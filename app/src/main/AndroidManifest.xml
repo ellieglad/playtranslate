@@ -66,6 +66,12 @@
             android:parentActivityName=".MainActivity"
             android:theme="@style/Theme.PlayTranslate" />
 
+        <activity
+            android:name=".TexthookerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:theme="@style/Theme.PlayTranslate" />
+
 <!-- Foreground service that owns the OCR + translation pipeline. -->
         <service
             android:name=".CaptureService"

@@ -263,19 +263,28 @@ class SettingsBottomSheet : DialogFragment() {
         // Register display listener for hot-plug
         displayListener?.let { displayManager.unregisterDisplayListener(it) }
         displayListener = object : DisplayManager.DisplayListener {
-            override fun onDisplayAdded(displayId: Int) { reinflateIfDisplaysChanged(displayManager) }
-            override fun onDisplayRemoved(displayId: Int) { reinflateIfDisplaysChanged(displayManager) }
+            override fun onDisplayAdded(displayId: Int) { onDisplaysChanged(displayManager) }
+            override fun onDisplayRemoved(displayId: Int) { onDisplaysChanged(displayManager) }
             // capturableDisplays() filters on STATE_ON, so a fold/unfold or
             // monitor sleep/wake changes the picker's set without firing
             // add/remove. Same-count swaps (one panel off as another comes on)
             // would be missed by a count check, so compare the set of ids.
-            override fun onDisplayChanged(displayId: Int) { reinflateIfDisplaysChanged(displayManager) }
+            override fun onDisplayChanged(displayId: Int) { onDisplaysChanged(displayManager) }
         }
         displayManager.registerDisplayListener(displayListener, null)
 
-        // Capture thumbnails asynchronously
-        val myDisplayId = requireActivity().display?.displayId ?: android.view.Display.DEFAULT_DISPLAY
+        loadThumbnailsFor(displays, view, r)
+    }
+
+    /** Async-fetch a thumbnail for any display in [displays] that doesn't
+     *  already have one. Re-uses the screenshot service when available, or
+     *  a PixelCopy of our own activity window for our own display. */
+    private fun loadThumbnailsFor(
+        displays: List<android.view.Display>, view: View, r: SettingsRenderer
+    ) {
+        val myDisplayId = activity?.display?.displayId ?: android.view.Display.DEFAULT_DISPLAY
         displays.forEach { display ->
+            if (r.displayThumbnails.containsKey(display.displayId)) return@forEach
             val mgr = PlayTranslateAccessibilityService.instance?.screenshotManager
             if (mgr != null) {
                 viewLifecycleOwner.lifecycleScope.launch {
@@ -299,12 +308,31 @@ class SettingsBottomSheet : DialogFragment() {
         }
     }
 
-    private fun reinflateIfDisplaysChanged(dm: DisplayManager) {
-        val newIds = dm.capturableDisplays().mapTo(mutableSetOf()) { it.displayId }
-        if (newIds != lastDisplayIds && isAdded) {
-            lastDisplayIds = newIds
-            reinflateContent()
-        }
+    /** Display listener entry point. Targeted refresh of the displays section
+     *  only — a full [reinflateContent] would call `parent.addView(newView)`
+     *  on the host's container, which throws when the host is the inline
+     *  FragmentContainerView (`R.id.settingsContainer` in MainActivity)
+     *  because the new view isn't associated with a fragment. The listener
+     *  fires for every display state change including screen-on after sleep,
+     *  so the crash was reliable any time the device woke with the settings
+     *  tab selected (e.g. the user backgrounding the app into CustomTabs and
+     *  the device sleeping). */
+    private fun onDisplaysChanged(dm: DisplayManager) {
+        val newDisplays = dm.capturableDisplays()
+        val newIds = newDisplays.mapTo(mutableSetOf()) { it.displayId }
+        if (newIds == lastDisplayIds) return
+        if (!isAdded) return
+        val v = view ?: return
+        val r = renderer ?: return
+        lastDisplayIds = newIds
+
+        // Drop thumbnails for displays that disappeared so we don't pin
+        // their bitmaps until onDestroyView.
+        val dropped = r.displayThumbnails.keys - newIds
+        dropped.forEach { id -> r.displayThumbnails.remove(id)?.recycle() }
+
+        r.refreshDisplaysSection(newDisplays, Prefs(requireContext()))
+        loadThumbnailsFor(newDisplays, v, r)
     }
 
     // ── Re-inflate (used for theme changes in dialog mode) ──────────────

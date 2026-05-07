@@ -124,6 +124,8 @@ dependencies {
 
     // Networking
     implementation(libs.okhttp)
+    implementation(libs.java.websocket)
+    implementation(libs.nanohttpd)
     implementation(libs.gson)
 
     // Japanese morphological analysis
@@ -140,6 +142,7 @@ dependencies {
 
     // HanLP CRF segmenter (Phase 4: Chinese word segmentation)
     implementation(libs.hanlp)
+    implementation(libs.androidx.browser)
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")

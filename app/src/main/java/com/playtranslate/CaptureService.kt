@@ -323,6 +323,7 @@ class CaptureService : Service() {
         Log.w(TAG, "onDestroy")
         instance = null
         stopLive()
+        WebsocketManager.instance.disconnect()
         serviceScope.cancel()
         // The TranslationBackendRegistry is owned at app scope (built in
         // PlayTranslateApplication.onCreate) and outlives this service —
@@ -651,6 +652,8 @@ class CaptureService : Service() {
                 return
             }
 
+            WebsocketManager.instance.sendOcr(ocrResult)
+
             state.value = CaptureState.InProgress(getString(R.string.status_translating))
             val (translated, note) = translateGroups(ocrResult.groupTexts)
 
@@ -817,6 +820,7 @@ class CaptureService : Service() {
         return when (prefs.overlayMode) {
             OverlayMode.FURIGANA -> OverlayFlavor.FURIGANA
             OverlayMode.TRANSLATION -> OverlayFlavor.TRANSLATION
+            OverlayMode.OCR_ONLY -> OverlayFlavor.OCR_ONLY
         }
     }
 
@@ -896,6 +900,7 @@ class CaptureService : Service() {
         val newInstances: Map<Int, LiveMode> = (toAdd + toRebuild).associateWith { id ->
             when (flavor) {
                 OverlayFlavor.IN_APP_ONLY -> InAppOnlyMode(this, id)
+                OverlayFlavor.OCR_ONLY -> OcrOnlyMode(this, id)
                 OverlayFlavor.FURIGANA -> FuriganaMode(this, a11y!!, id)
                 OverlayFlavor.TRANSLATION -> PinholeOverlayMode(this, a11y!!, id)
             }
@@ -1011,7 +1016,7 @@ class CaptureService : Service() {
      *  effectively "are we in InAppOnly mode" — but checking via [Any] avoids
      *  silent assumptions if that invariant ever shifts. */
     val isInAppOnly: Boolean
-        get() = isLive && liveModes.values.any { it.flavor == OverlayFlavor.IN_APP_ONLY }
+        get() = isLive && liveModes.values.any { it.flavor == OverlayFlavor.IN_APP_ONLY || it.flavor == OverlayFlavor.OCR_ONLY }
 
     /**
      * Describes what a hold gesture will do in the current state. Mirrors the
@@ -1028,6 +1033,7 @@ class CaptureService : Service() {
         SHOW_TRANSLATIONS,
         /** Default: hold shows a furigana one-shot (auto mode = furigana). */
         SHOW_FURIGANA,
+        OCR,
     }
 
     val holdBehavior: HoldBehavior
@@ -1047,6 +1053,7 @@ class CaptureService : Service() {
             // user's currently-selected overlay mode
             return when (Prefs(this).overlayMode) {
                 OverlayMode.FURIGANA -> HoldBehavior.SHOW_FURIGANA
+                OverlayMode.OCR_ONLY -> HoldBehavior.OCR
                 else -> HoldBehavior.SHOW_TRANSLATIONS
             }
         }
@@ -1306,6 +1313,7 @@ class CaptureService : Service() {
     // ── Hotkey hold ─────────────────────────────────────────────────────
 
     private var hotkeyActive = false
+    private var hotkeyActiveMode: OverlayMode? = null
 
     /** Begin a hotkey hold-to-preview with a forced overlay mode. Like the
      *  in-app translate button, the hotkey is a "global" trigger — it fans
@@ -1317,6 +1325,7 @@ class CaptureService : Service() {
         Log.d("HotkeyDbg", "hotkeyHoldStart: mode=$mode isConfigured=$isConfigured isLive=$isLive")
         if (hotkeyActive) return
         hotkeyActive = true
+        hotkeyActiveMode = mode
         val targets = oneShotFanoutDisplayIds()
         // No fan-out target (multi-display + every selected display is
         // skip-eligible). hotkeyActive is still set so the matching
@@ -1326,11 +1335,29 @@ class CaptureService : Service() {
         beginHoldPreview(mode, targets, panelTarget)
     }
 
-    /** End a hotkey hold-to-preview. */
+    /** End a hotkey hold-to-preview.
+     *
+     *  For TRANSLATION/FURIGANA the cycle is overlay-bound and the user is
+     *  actively peeking through it; release means "tear it all down". For
+     *  OCR_ONLY there's no overlay — the cycle's only product is a WebSocket
+     *  broadcast, which happens partway through `runOcrPipeline`. A typical
+     *  hotkey tap (~150 ms) is shorter than the OCR latency, so cancelling
+     *  on release would kill the in-flight cycle before it reaches `send()`.
+     *  Treat OCR_ONLY release as fire-and-forget: clear `holdActive`, refresh
+     *  any live modes, but leave the cycle running. */
     fun hotkeyHoldEnd() {
         if (!hotkeyActive) return
         hotkeyActive = false
+        val mode = hotkeyActiveMode
+        hotkeyActiveMode = null
         DetectionLog.log("Hotkey END (live=$isLive)")
+        if (mode == OverlayMode.OCR_ONLY) {
+            holdActive = false
+            if (isLive) {
+                liveModes.values.forEach { it.refresh() }
+            }
+            return
+        }
         endHoldPreview()
     }
 
@@ -1577,6 +1604,30 @@ class CaptureService : Service() {
 
             if (ocrResult == null) return PipelineOutcome.NoText
 
+            WebsocketManager.instance.sendOcr(ocrResult)
+
+            if (Prefs(this).overlayMode == OverlayMode.OCR_ONLY) {
+                val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                val note = "OCR only"
+                return PipelineOutcome.Success(
+                    PipelineResult(
+                        result = TranslationResult(
+                            originalText = ocrResult.fullText,
+                            segments = ocrResult.segments,
+                            translatedText = ocrResult.fullText,
+                            timestamp = timestamp,
+                            screenshotPath = screenshotPath,
+                            note = note
+                        ),
+                        groupBounds = ocrResult.groupBounds,
+                        groupTranslations = ocrResult.groupTexts.map { "" },
+                        cropLeft = left, cropTop = top,
+                        screenshotW = raw.width, screenshotH = raw.height,
+                        ocrResult = ocrResult
+                    )
+                )
+            }
+
             val perGroup = translateGroupsSeparately(ocrResult.groupTexts)
             val translated = perGroup.joinToString("\n\n") { it.first }
             val note = perGroup.mapNotNull { it.second }.firstOrNull()
@@ -1790,14 +1841,20 @@ class CaptureService : Service() {
 
         // Stop live mode if the user can no longer see or manage it.
         if (isLive) {
+            // TexthookerActivity.isInForeground is session-scoped (true from
+            // session start to onDestroy), not lifecycle-scoped — so it stays
+            // true while CustomTabs is on top of our activity, which is the
+            // entire useful lifetime of the texthooker session.
+            val appInForeground = MainActivity.isInForeground
+                || TexthookerActivity.isInForeground
             val shouldStop = if (isInAppOnly) {
                 // In-App Only: results only visible while app is in foreground
-                !MainActivity.isInForeground
+                !appInForeground
             } else {
                 // Overlay modes: stop if no control surface at all (no icon, no app)
-                !iconShowing && !MainActivity.isInForeground
+                !iconShowing && !appInForeground
             }
-            Log.v(TAG, "updateForegroundState: isLive=true iconShowing=$iconShowing isInForeground=${MainActivity.isInForeground} isInAppOnly=$isInAppOnly shouldStop=$shouldStop")
+            Log.v(TAG, "updateForegroundState: isLive=true iconShowing=$iconShowing appInForeground=$appInForeground isInAppOnly=$isInAppOnly shouldStop=$shouldStop")
             if (shouldStop) {
                 Log.w(TAG, "updateForegroundState: stopping live (no visible surface)")
                 stopLive()

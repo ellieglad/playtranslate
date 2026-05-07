@@ -26,7 +26,7 @@ data class CachedOverlayState(
  * `Prefs.shouldUseInAppOnlyMode` and only applies when the user has a
  * single display selected.
  */
-enum class OverlayFlavor { TRANSLATION, FURIGANA, IN_APP_ONLY }
+enum class OverlayFlavor { TRANSLATION, FURIGANA, IN_APP_ONLY, OCR_ONLY }
 
 /**
  * Interface for live capture modes. Each mode owns its detection loop,

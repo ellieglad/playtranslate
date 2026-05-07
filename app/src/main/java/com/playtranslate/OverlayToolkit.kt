@@ -490,6 +490,8 @@ object OverlayToolkit {
 
         if (ocrResult == null) return null
 
+        WebsocketManager.instance.sendOcr(ocrResult)
+
         val dedupKey = ocrResult.fullText.filter { c -> OcrManager.isSourceLangChar(c, sourceLang) }
         if (dedupKey.isEmpty()) return null
 

@@ -20,7 +20,8 @@ import org.json.JSONObject
  */
 enum class OverlayMode(val displayName: String) {
     TRANSLATION("Translation"),
-    FURIGANA("Furigana");
+    FURIGANA("Furigana"),
+    OCR_ONLY("OCR");
 
     companion object {
         fun fromStorageName(name: String?): OverlayMode =
@@ -433,6 +434,11 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_HOTKEY_FURIGANA, "") ?: ""
         set(v) = sp.edit().putString(KEY_HOTKEY_FURIGANA, v).apply()
 
+    /** Hotkey combo for OCR-only (sent to Texthooker). Empty = not set. Format: keyCodes joined by "+". */
+    var hotkeyOcrOnly: String
+        get() = sp.getString(KEY_HOTKEY_OCR_ONLY, "") ?: ""
+        set(v) = sp.edit().putString(KEY_HOTKEY_OCR_ONLY, v).apply()
+
     /** Capture interval for live mode in seconds. */
     var captureIntervalSec: Float
         get() = sp.getFloat(KEY_CAPTURE_INTERVAL_SEC, DEFAULT_CAPTURE_INTERVAL_SEC).coerceAtLeast(MIN_CAPTURE_INTERVAL_SEC)
@@ -597,6 +603,7 @@ class Prefs(context: Context) {
         private const val KEY_DEBUG_SAVE_OCR_SEED            = "debug_save_ocr_seed"
         private const val KEY_HOTKEY_TRANSLATION           = "hotkey_translation"
         private const val KEY_HOTKEY_FURIGANA              = "hotkey_furigana"
+        private const val KEY_HOTKEY_OCR_ONLY              = "hotkey_ocr_only"
         private const val KEY_LAST_UPDATE_CHECK            = "last_update_check"
         private const val KEY_UPDATE_SKIP_TAG              = "update_skip_tag"
         private const val KEY_TARGET_PACK_MIGRATION_DISMISSED = "target_pack_migration_dismissed"

@@ -1063,16 +1063,20 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
 
     /**
      * True when the user has some visible indication the app is listening:
-     * either the floating icon is on screen or MainActivity is foregrounded.
-     * Used to gate hotkey activation so a user who has hidden the icon and
-     * backgrounded the app doesn't get "ghost" hotkey triggers with no
+     * the floating icon is on screen, MainActivity is foregrounded, or a
+     * texthooker session is active (the browser sits on top of the app's own
+     * activity, but the user is in an OCR workflow and expects hotkeys to
+     * work). Used to gate hotkey activation so a user who has hidden the icon
+     * and backgrounded the app doesn't get "ghost" hotkey triggers with no
      * feedback. Differs from the foreground-notification rule
      * ([CaptureService.updateForegroundState]) which intentionally omits
      * `foregrounded` — the notification is redundant while the app is on
      * screen, but hotkeys obviously must still work then.
      */
     fun isUserReachable(): Boolean =
-        hasAnyFloatingIcon || MainActivity.isInForeground
+        hasAnyFloatingIcon
+            || MainActivity.isInForeground
+            || TexthookerActivity.isInForeground
 
     // ── Hotkey combo detection ──────────────────────────────────────────
 
@@ -1119,6 +1123,7 @@ class PlayTranslateAccessibilityService : AccessibilityService() {
         val combos = listOf(
             HotkeyCombo(parseCombo(prefs.hotkeyTranslation), OverlayMode.TRANSLATION),
             HotkeyCombo(parseCombo(prefs.hotkeyFurigana), OverlayMode.FURIGANA),
+            HotkeyCombo(parseCombo(prefs.hotkeyOcrOnly), OverlayMode.OCR_ONLY),
         ).filter { it.keys.isNotEmpty() }
 
         val state = HotkeyState(activeHotkeyMode, pendingActivationMode)

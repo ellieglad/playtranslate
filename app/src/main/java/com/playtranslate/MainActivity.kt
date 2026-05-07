@@ -87,6 +87,7 @@ class MainActivity :
     private lateinit var btnTranslate: View
     private lateinit var btnSettings: View
     private lateinit var btnRegions: View
+    private lateinit var btnTexthooker: View
     private lateinit var tvTranslateTitle: TextView
     private lateinit var tvTranslateSubtitle: TextView
     private lateinit var btnLiveToggle: View
@@ -97,6 +98,7 @@ class MainActivity :
     private lateinit var menuScrim: View
     private lateinit var menuItemLiveIcon: ImageView
     private lateinit var menuItemLiveLabel: TextView
+    private lateinit var menuItemTexthooker: View
     private lateinit var resultsContainer: View
     private lateinit var regionPickerContainer: View
     private lateinit var settingsContainer: View
@@ -530,6 +532,7 @@ class MainActivity :
         btnTranslate         = findViewById(R.id.btnTranslate)
         btnSettings          = findViewById(R.id.btnSettings)
         btnRegions           = findViewById(R.id.btnRegions)
+        btnTexthooker        = findViewById(R.id.btnTexthooker)
         tvTranslateTitle     = findViewById(R.id.tvTranslateTitle)
         tvTranslateSubtitle  = findViewById(R.id.tvTranslateSubtitle)
         btnLiveToggle        = findViewById(R.id.btnLiveToggle)
@@ -540,6 +543,7 @@ class MainActivity :
         menuScrim            = findViewById(R.id.menuScrim)
         menuItemLiveIcon     = findViewById(R.id.menuItemLiveIcon)
         menuItemLiveLabel    = findViewById(R.id.menuItemLiveLabel)
+        menuItemTexthooker   = findViewById(R.id.menuItemTexthooker)
         resultsContainer     = findViewById(R.id.resultsContainer)
         regionPickerContainer = findViewById(R.id.regionPickerContainer)
         settingsContainer    = findViewById(R.id.settingsContainer)
@@ -633,7 +637,17 @@ class MainActivity :
         val label = region.label.ifEmpty { "Full screen" }
         val isInAppOnly = Prefs.shouldUseInAppOnlyMode(this)
         val overlayLive = isLiveMode && !isInAppOnly
-        val prefix = if (overlayLive) "Reload " else "Translate "
+        val isOcrMode = prefs.overlayMode == OverlayMode.OCR_ONLY
+        // Texthooker is only meaningful in OCR mode (the WS broadcast is the
+        // whole product). Hide both entry points when the user is in any other
+        // overlay mode so we don't surface a button that no-ops.
+        btnTexthooker.visibility = if (isOcrMode) View.VISIBLE else View.GONE
+        menuItemTexthooker.visibility = if (isOcrMode) View.VISIBLE else View.GONE
+        val prefix = when {
+            isOcrMode -> "OCR "
+            overlayLive -> "Reload "
+            else -> "Translate "
+        }
         tvTranslateTitle.text = SpannableStringBuilder(prefix + label).apply {
             setSpan(StyleSpan(Typeface.BOLD), prefix.length, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
@@ -649,6 +663,8 @@ class MainActivity :
                 "Hold to show translations instead of $hintLabel"
             CaptureService.HoldBehavior.SHOW_FURIGANA ->
                 "Hold to show $hintLabel on game screen"
+            CaptureService.HoldBehavior.OCR ->
+                "Hold to OCR game screen"
             else ->
                 "Hold to show translations on game screen"
         }
@@ -744,17 +760,23 @@ class MainActivity :
             false
         }
 
+        btnTexthooker.setOnClickListener { openTexthooker() }
         btnSettings.setOnClickListener { openSettings() }
         btnRegions.setOnClickListener { showRegionPicker() }
         btnLiveToggle.setOnClickListener { toggleLiveMode() }
         applyDragDropdownGestures(btnLiveToggle) { showAutoModeDropdown(it) }
         menuScrim.setOnClickListener { dismissMenu() }
         findViewById<View>(R.id.menuItemSettings).setOnClickListener { dismissMenu(); openSettings() }
+        menuItemTexthooker.setOnClickListener { dismissMenu(); openTexthooker() }
         findViewById<View>(R.id.menuItemLive).setOnClickListener { dismissMenu(); toggleLiveMode() }
         findViewById<View>(R.id.menuItemRegion).setOnClickListener { dismissMenu(); showRegionPicker() }
         findViewById<View>(R.id.menuItemTranslations).setOnClickListener { dismissMenu(); hideRegionPicker() }
         findViewById<View>(R.id.menuItemClose).setOnClickListener { dismissMenu() }
 
+    }
+
+    private fun openTexthooker() {
+        startActivity(Intent(this, TexthookerActivity::class.java))
     }
 
     // ── Slide-in menu ──────────────────────────────────────────────────

@@ -112,6 +112,8 @@ class SettingsRenderer(
     private val rowHotkeyTranslation: View = root.findViewById(R.id.rowHotkeyTranslation)
     private val rowHotkeyFurigana: View = root.findViewById(R.id.rowHotkeyFurigana)
     private val dividerHotkeyFurigana: View = root.findViewById(R.id.dividerHotkeyFurigana)
+    private val rowHotkeyOcrOnly: View = root.findViewById(R.id.rowHotkeyOcrOnly)
+    private val dividerHotkeyOcrOnly: View = root.findViewById(R.id.dividerHotkeyOcrOnly)
 
     private val captureDisplaySection: View = root.findViewById(R.id.captureDisplaySection)
     private val llDisplayOptions: LinearLayout = root.findViewById(R.id.llDisplayOptions)
@@ -340,7 +342,7 @@ class SettingsRenderer(
 
             buildPillToggle(
                 container = overlayModeToggleContainer,
-                options = listOf("Translation" to OverlayMode.TRANSLATION, hintLabel to OverlayMode.FURIGANA),
+                options = listOf("Translation" to OverlayMode.TRANSLATION, "OCR" to OverlayMode.OCR_ONLY, hintLabel to OverlayMode.FURIGANA),
                 selected = prefs.overlayMode,
                 onSelect = { mode ->
                     prefs.overlayMode = mode
@@ -480,6 +482,17 @@ class SettingsRenderer(
             rowHotkeyFurigana.visibility = View.GONE
             dividerHotkeyFurigana.visibility = View.GONE
         }
+
+        // -- OCR Only hotkey (always visible) --
+        rowHotkeyOcrOnly.visibility = View.VISIBLE
+        dividerHotkeyOcrOnly.visibility = View.VISIBLE
+        setupSingleHotkeyRow(
+            row = rowHotkeyOcrOnly,
+            title = "Hotkey: send OCR to Texthooker",
+            getHotkey = { prefs.hotkeyOcrOnly },
+            setHotkey = { prefs.hotkeyOcrOnly = it },
+            dialogTitle = "Send to Texthooker"
+        )
     }
 
     private fun setupSingleHotkeyRow(
@@ -1395,7 +1408,7 @@ class SettingsRenderer(
         if (hasHintText) {
             buildPillToggle(
                 container = overlayModeToggleContainer,
-                options = listOf("Translation" to OverlayMode.TRANSLATION, hintLabel to OverlayMode.FURIGANA),
+                options = listOf("Translation" to OverlayMode.TRANSLATION, "OCR" to OverlayMode.OCR_ONLY, hintLabel to OverlayMode.FURIGANA),
                 selected = prefs.overlayMode,
                 onSelect = { mode ->
                     prefs.overlayMode = mode
@@ -1425,6 +1438,18 @@ class SettingsRenderer(
     }
 
     fun refreshDisplayRows(prefs: Prefs) {
+        buildDisplayRows(prefs)
+    }
+
+    /** Targeted refresh for hot-plug / sleep-wake display changes. Does the
+     *  same work as [setupCaptureDisplaySection] minus the initial DM lookup —
+     *  the caller already has the new list. Used in place of a full sheet
+     *  re-inflate, which can't run safely in inline mode (the sheet's parent
+     *  is a FragmentContainerView and rejects bare addView calls). */
+    fun refreshDisplaysSection(displays: List<android.view.Display>, prefs: Prefs) {
+        displayList = displays
+        captureDisplaySection.visibility =
+            if (displayList.size <= 1) View.GONE else View.VISIBLE
         buildDisplayRows(prefs)
     }
 

@@ -2,6 +2,7 @@ package com.playtranslate
 
 import android.graphics.Bitmap
 import com.playtranslate.language.SourceLanguageEngines
+import com.playtranslate.ui.TranslationOverlayView
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -127,6 +128,24 @@ class OneShotManager(private val service: CaptureService) {
 
             val (ocrResult, _, cropLeft, cropTop, screenshotW, screenshotH) = pipeline
 
+            if (cycle.forceMode == OverlayMode.OCR_ONLY) {
+                if (displayId == cycle.panelDisplayId) {
+                    service.emitHoldLoading(false)
+                    val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+                    service.emitResult(
+                        com.playtranslate.model.TranslationResult(
+                            originalText = ocrResult.fullText,
+                            segments = ocrResult.segments,
+                            translatedText = ocrResult.fullText,
+                            timestamp = timestamp,
+                            screenshotPath = null,
+                            note = "Texthooker Mode (OCR only)"
+                        )
+                    )
+                }
+                return
+            }
+
             // 4. Save screenshot for Anki — per-display filename so a
             //    concurrent live cycle on another display can't clobber it.
             val screenshotPath = PlayTranslateAccessibilityService.instance
@@ -172,6 +191,17 @@ class OneShotManager(private val service: CaptureService) {
             OverlayMode.TRANSLATION -> TranslationOneShotProcessor(
                 service::translateGroupsSeparately
             )
+            OverlayMode.OCR_ONLY -> object : OneShotProcessor {
+                override suspend fun buildBoxes(
+                    ocrResult: OcrManager.OcrResult,
+                    raw: Bitmap,
+                    cropLeft: Int,
+                    cropTop: Int,
+                    screenshotW: Int,
+                    screenshotH: Int,
+                    onIntermediate: (List<TranslationOverlayView.TextBox>) -> Unit
+                ): List<TranslationOverlayView.TextBox> = emptyList()
+            }
         }
     }
 
