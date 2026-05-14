@@ -20,12 +20,26 @@ private const val TAG = "AnkiManager"
  */
 class AnkiManager(private val context: Context) {
 
+    /**
+     * Lightweight snapshot of an AnkiDroid note type, returned by [getModels].
+     * `type` is AnkiDroid's model_type column (0 = standard, 1 = cloze).
+     * `sortf` is the model's sort-field index (which field AnkiDroid uses
+     * for duplicate detection + browser sorting).
+     */
+    data class ModelInfo(
+        val id: Long,
+        val name: String,
+        val fieldNames: List<String>,
+        val type: Int,
+        val sortf: Int,
+    )
+
     companion object {
         const val PERMISSION = "com.ichi2.anki.permission.READ_WRITE_DATABASE"
 
         private const val AUTHORITY = "com.ichi2.anki.flashcards"
         private const val FILE_PROVIDER_AUTHORITY = "com.playtranslate.fileprovider"
-        private const val MODEL_NAME = "PlayTranslate v004"
+        const val MODEL_NAME = "PlayTranslate v004"
 
         /** AnkiDroid field separator (ASCII 31, unit separator) */
         private const val SEP = "\u001f"
@@ -148,33 +162,135 @@ class AnkiManager(private val context: Context) {
     }
 
     /**
-     * Adds a note to AnkiDroid and moves its cards to [deckId].
-     * [front] and [back] are pre-built HTML strings.
-     * Returns true on success.
+     * Returns the standard (non-cloze) note types available in AnkiDroid,
+     * minus the synthetic v004 model (which is reached via the "Default
+     * (PlayTranslate)" sentinel and shouldn't appear in the Card Type
+     * picker). Returns empty list on query failure or when AnkiDroid is
+     * absent — callers treat empty as "transient" and avoid healing
+     * destructively.
+     */
+    fun getModels(): List<ModelInfo> {
+        val result = mutableListOf<ModelInfo>()
+        try {
+            context.contentResolver.query(MODEL_URI, null, null, null, null)?.use { cursor ->
+                val idCol     = cursor.getColumnIndex("_id")
+                val nameCol   = cursor.getColumnIndex("name")
+                val fieldsCol = cursor.getColumnIndex("field_names")
+                val typeCol   = cursor.getColumnIndex("type")
+                // The documented FlashCardsContract column is
+                // `sort_field_index`; older AnkiDroid revisions exposed
+                // the column as `sortf` matching Anki desktop's
+                // database schema. Probe the documented name first
+                // and fall back to the legacy alias — without this
+                // probe, `getColumnIndex` returns -1 on modern
+                // AnkiDroid and our sort-field guard would always
+                // inspect field index 0 regardless of the model's
+                // real sort field.
+                val sortfCol = cursor.getColumnIndex("sort_field_index")
+                    .takeIf { it >= 0 }
+                    ?: cursor.getColumnIndex("sortf")
+                while (cursor.moveToNext()) {
+                    val id   = if (idCol   >= 0) cursor.getLong(idCol)     else continue
+                    val name = if (nameCol >= 0) cursor.getString(nameCol) ?: continue else continue
+                    val rawFields = if (fieldsCol >= 0) cursor.getString(fieldsCol) ?: "" else ""
+                    val fieldNames = rawFields.split(SEP).filter { it.isNotBlank() }
+                    if (fieldNames.isEmpty()) continue
+                    val type  = if (typeCol  >= 0) cursor.getInt(typeCol)  else 0
+                    val sortf = if (sortfCol >= 0) cursor.getInt(sortfCol) else 0
+                    if (type == 1) continue                  // cloze — out of scope
+                    if (name == MODEL_NAME) continue         // synthetic v004 reached via Default sentinel
+                    result += ModelInfo(id, name, fieldNames, type, sortf)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getModels failed: ${e.message}", e)
+        }
+        return result
+    }
+
+    /**
+     * Adds a note to AnkiDroid for the legacy v004 path. Resolves v004's
+     * model id (creating it if necessary), then forwards to
+     * [addNote(modelId, deckId, fields, tags)].
      */
     fun addNote(deckId: Long, front: String, back: String): Boolean {
         val modelId = getOrCreateModel() ?: return false
-
         Log.d(TAG, "addNote front(${front.length}) back(${back.length})")
+        return addNote(modelId, deckId, listOf(front, back))
+    }
 
-        val fields = listOf(front, back).joinToString(SEP)
+    /**
+     * Generalised insert: writes [fields] (joined with the field separator)
+     * into a new note of [modelId], then moves the resulting card to
+     * [deckId]. The "did" key in the insert ContentValues is ignored by
+     * AnkiDroid 2.23.x, so we patch the deck via an update on notes/{id}/cards/0
+     * — same workaround as the legacy 2-arg overload.
+     */
+    fun addNote(
+        modelId: Long,
+        deckId: Long,
+        fields: List<String>,
+        tags: String = "playtranslate",
+    ): Boolean {
+        if (fields.isEmpty()) {
+            Log.e(TAG, "addNote called with empty fields list")
+            return false
+        }
+        val flds = fields.joinToString(SEP)
         val cv = ContentValues().apply {
             put("mid", modelId)
-            put("flds", fields)
-            put("tags", "playtranslate")
+            put("flds", flds)
+            put("tags", tags)
             put("did", deckId)
         }
-
         return try {
             val noteUri = context.contentResolver.insert(NOTE_URI, cv) ?: return false
-            // "did" in the insert ContentValues is ignored by AnkiDroid 2.23.x.
-            // Move the card by updating notes/{id}/cards/0 with deck_id.
-            val cardUri = Uri.withAppendedPath(noteUri, "cards/0")
             val cardValues = ContentValues().apply { put("deck_id", deckId) }
+
+            // Baseline: move cards/0 directly. AnkiDroid 2.23.x ignores
+            // the insert-side `did`, so we have to relocate the card
+            // ourselves. This direct update worked on every AnkiDroid
+            // version that supported the structured insert at all, so
+            // we keep it as an unconditional fallback in case the
+            // enumeration step below (newer query path) fails for any
+            // reason. For single-template note types (the dominant
+            // case — v004, Basic, Lapis, JPMN, Migaku) this also moves
+            // the only generated card, so enumeration is a pure
+            // additive enhancement.
             try {
-                context.contentResolver.update(cardUri, cardValues, null, null)
+                val zeroUri = Uri.withAppendedPath(noteUri, "cards/0")
+                context.contentResolver.update(zeroUri, cardValues, null, null)
             } catch (e: Exception) {
-                Log.e(TAG, "card deck update failed: ${e.message}", e)
+                Log.e(TAG, "card deck update failed for ord=0: ${e.message}", e)
+            }
+
+            // Multi-card enhancement: enumerate any other generated
+            // cards (ord>=1) and move them too. Note types like
+            // "Basic (and reversed card)" emit a second card at ord=1
+            // that the baseline above doesn't reach. Failures here are
+            // non-fatal — the common single-card case is already
+            // handled and the worst-case degradation is "second card
+            // lands in default deck", which is the pre-multi-card
+            // behavior anyway.
+            val cardsUri = Uri.withAppendedPath(noteUri, "cards")
+            try {
+                context.contentResolver.query(cardsUri, arrayOf("ord"), null, null, null)
+                    ?.use { cursor ->
+                        val ordCol = cursor.getColumnIndex("ord")
+                        if (ordCol < 0) return@use
+                        while (cursor.moveToNext()) {
+                            val ord = cursor.getInt(ordCol)
+                            if (ord == 0) continue  // already moved above
+                            val cardUri = Uri.withAppendedPath(noteUri, "cards/$ord")
+                            try {
+                                context.contentResolver.update(cardUri, cardValues, null, null)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "card deck update failed for ord=$ord: ${e.message}", e)
+                            }
+                        }
+                    }
+            } catch (e: Exception) {
+                Log.e(TAG, "cards enumeration failed: ${e.message}", e)
             }
             true
         } catch (e: Exception) {

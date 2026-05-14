@@ -17,13 +17,23 @@ android {
         applicationId = "com.playtranslate"
         minSdk = 30
         targetSdk = 34
-        versionCode = 6
-        versionName = "2.0.0"
+        versionCode = 7
+        versionName = "2.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "DEEPL_API_KEY",
             "\"${localProps.getProperty("deepl.api.key", "")}\"")
+
+        // TranslateGemma toggle. Q4_0 + prefix-mode KV reuse (commits c8fc4134 /
+        // 9b337b60) brought Thor latency to median 1436ms / p90 2586ms / max
+        // 4642ms with zero quality flags — comfortably acceptable for manual
+        // lookups, slow but usable in live/overlay paths if the user opts
+        // into TG knowing the latency cost. No registry-level live-mode gate
+        // today; users decide via the Settings toggle. The catalog URL/sha256
+        // reconciliation is a separate pre-release gate (see
+        // langpack_catalog.json comment).
+        buildConfigField("boolean", "TRANSLATEGEMMA_ENABLED", "true")
     }
 
     signingConfigs {
@@ -59,6 +69,16 @@ android {
     }
 
     packaging {
+        // TranslateGemma's GGML_BACKEND_DL=ON pattern needs to dlopen
+        // libggml-cpu-android_*.so files at runtime via opendir() on
+        // nativeLibraryDir. Modern Android packaging keeps .so files inside
+        // the APK (mmap-loaded by System.loadLibrary) which is great for size
+        // but means nativeLibraryDir is empty on disk. Forcing legacy packaging
+        // extracts them to /data/app/.../lib/arm64/ so the dynamic backend
+        // loader can find them. This is required by ggml's backend-DL design.
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "/META-INF/LICENSE.md"
@@ -103,6 +123,8 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":llama"))
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

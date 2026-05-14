@@ -18,6 +18,10 @@
     <string name="accessibility_dialog_open">Open Accessibility Settings</string>
     <string name="status_accessibility_needed">Enable PlayTranslate in Accessibility Settings first</string>
 
+    <!-- Quick Settings tile -->
+    <string name="tile_label">PlayTranslate</string>
+    <string name="tile_subtitle_a11y_required">Enable accessibility</string>
+
     <!-- Status messages -->
     <string name="status_idle">Tap Translate to capture the game screen</string>
     <string name="status_hold_hint">Long-press Regions or Auto for quick-select menus</string>
@@ -93,6 +97,18 @@
     <string name="lang_state_extracting">Extracting…</string>
     <string name="lang_state_failed">Failed — retry</string>
     <string name="lang_size_mb">%1$d MB</string>
+
+    <!-- Pack-upgrade flow (launch-time staleness scan + Settings cell) -->
+    <string name="pack_upgrade_title">Language Pack Updates Available</string>
+    <string name="pack_upgrade_button_now">Update Now</string>
+    <string name="pack_upgrade_button_later">Update Later</string>
+    <string name="pack_upgrade_progress_title">Updating language packs</string>
+    <string name="pack_upgrade_progress_format">Downloading %1$s…</string>
+    <string name="pack_upgrade_progress_format_with_bytes">Downloading %1$s… %2$s of %3$s</string>
+    <string name="pack_upgrade_priming_models">Loading translation models…</string>
+    <string name="pack_upgrade_label_source">Game Language (%1$s)</string>
+    <string name="pack_upgrade_label_target">Your Language (%1$s)</string>
+    <string name="lang_section_update_packs_title">Update language packs</string>
     <string name="settings_display_hint">Select the display that shows the game. Usually Display 0 is the main/top screen.</string>
     <string name="settings_no_displays_found">No displays found</string>
     <string name="hint_deepl_key">Paste your DeepL API key here</string>
@@ -157,7 +173,6 @@
     <string name="anki_deck_row_empty">Pick a deck</string>
     <string name="anki_deck_label_format">Deck: %1$s</string>
     <string name="anki_save_button_label">Save Anki Card</string>
-    <string name="anki_group_deck">Anki Deck</string>
     <string name="anki_group_original">Original</string>
     <string name="anki_group_translation">Translation</string>
     <string name="anki_group_words">Words on card</string>
@@ -168,6 +183,92 @@
     <string name="anki_word_remove_content_description">Remove from card</string>
     <string name="anki_screenshot_remove_content_description">Remove screenshot</string>
     <string name="anki_pick_deck_title">Pick a deck</string>
+
+    <!-- Card Type picker + field mapping -->
+    <string name="anki_section_header">Anki</string>
+    <string name="anki_card_type_row_label">Card Type</string>
+    <string name="anki_card_type_row_empty">Default (PlayTranslate)</string>
+    <string name="anki_card_type_pick_title">Select Card Type</string>
+    <string name="anki_card_type_no_models">No card types found in AnkiDroid</string>
+    <string name="anki_card_type_stale_fallback">Card type no longer exists; using default</string>
+    <string name="anki_card_type_section_default">Default</string>
+    <string name="anki_card_type_section_custom">Card Types</string>
+    <string name="anki_card_type_edit_mapping_row_label">Edit field mapping</string>
+
+    <string name="anki_field_mapping_title">Configure %1$s</string>
+    <string name="anki_field_mapping_save">Save</string>
+    <string name="anki_field_mapping_unconfigured">Configure fields for this card type before sending</string>
+    <string name="anki_sort_field_empty">Map a value to “%1$s” — Anki uses this field to identify the note, and empty values cause duplicate-rejection errors on send.</string>
+    <string name="anki_models_unavailable">Couldn\'t reach AnkiDroid to look up card types. Try again in a moment.</string>
+    <string name="anki_card_type_basic_no_mapping">Basic card types don\'t need a field mapping — Front and Back are filled automatically based on whether you\'re saving a word or a sentence.</string>
+    <string name="anki_content_source_pick_title">Map \"%1$s\"</string>
+
+    <!-- ContentSource labels (dropdown options). Names persist in prefs,
+         so re-labeling here is safe but renaming enum constants is not.
+         The `*_desc` variants appear as the second-line subtitle in the
+         source picker; they include a concrete example of what PT
+         writes into the field. `<b>` markers are rendered via
+         HtmlCompat so the example shows what the user will actually
+         see on the card. -->
+    <string name="anki_content_none">Empty</string>
+    <string name="anki_content_none_desc">Sends nothing — the Anki field stays empty.</string>
+
+    <string name="anki_content_expression">Word / headword</string>
+    <string name="anki_content_expression_desc">The dictionary form of the highlighted word, no brackets. Example: 聞く</string>
+
+    <string name="anki_content_expression_furigana">Word / headword with furigana</string>
+    <string name="anki_content_expression_furigana_desc">The dictionary form with per-kanji furigana brackets, for fields rendered through \{\{furigana:\}\}. Example: 聞[き]く</string>
+
+    <string name="anki_content_reading">Word reading (kana)</string>
+    <string name="anki_content_reading_desc">The pure-kana reading of the highlighted word. Example: きく</string>
+
+    <string name="anki_content_sentence">Source sentence</string>
+    <string name="anki_content_sentence_desc">The source sentence with the highlighted word bolded. Example: 友達に<b>聞いた</b></string>
+
+    <string name="anki_content_sentence_furigana">Source sentence with furigana</string>
+    <string name="anki_content_sentence_furigana_desc">The source sentence with per-kanji furigana brackets, for fields rendered through \{\{furigana:\}\}. Example: 友達[ともだち]に<b>聞[き]いた</b></string>
+
+    <string name="anki_content_sentence_translation">Translated sentence</string>
+    <string name="anki_content_sentence_translation_desc">The translation of the source sentence in your selected target language.</string>
+
+    <string name="anki_content_definition">Definition</string>
+    <string name="anki_content_definition_desc">The dictionary definition(s) of the highlighted word, formatted as HTML.</string>
+
+    <string name="anki_content_examples">Example sentences</string>
+    <string name="anki_content_examples_desc">Tatoeba example sentences for the highlighted word, when available.</string>
+
+    <string name="anki_content_picture">Screenshot</string>
+    <string name="anki_content_picture_desc">A screenshot of the game screen, wrapped in &lt;img&gt; markup ready for a Picture / Screenshot field.</string>
+
+    <string name="anki_content_frequency">Frequency stars</string>
+    <string name="anki_content_frequency_desc">Frequency rating of the highlighted word as stars. Example: ★★★</string>
+
+    <string name="anki_content_part_of_speech">Part of speech</string>
+    <string name="anki_content_part_of_speech_desc">Part-of-speech tag for the highlighted word (word-mode cards only). Example: noun</string>
+
+    <string name="anki_content_words_table">Words list (sentence cards)</string>
+    <string name="anki_content_words_table_desc">A formatted list of every word PlayTranslate detected in the sentence, with readings and definitions.</string>
+
+    <!-- Card-type state flags. The "(x)" suffix discloses the literal
+         value the flag emits when it fires — visible reminder that
+         these go into Mustache section-gate fields, not regular
+         content fields. -->
+    <string name="anki_content_flag_vocabulary">Vocabulary card marker (x)</string>
+    <string name="anki_content_flag_vocabulary_desc">Emits \"x\" on word-mode sends only — use for template fields like Migaku\'s “Is Vocabulary Card”.</string>
+
+    <string name="anki_content_flag_sentence">Sentence card marker (x)</string>
+    <string name="anki_content_flag_sentence_desc">Emits \"x\" on sentence-mode sends only — use for template fields like Lapis\'s or JPMN\'s “IsSentenceCard”.</string>
+
+    <string name="anki_content_flag_targeted_sentence">Targeted sentence card marker (x)</string>
+    <string name="anki_content_flag_targeted_sentence_desc">Emits \"x\" on sentence sends that have a highlighted target word — use for JPMN\'s “IsTargetedSentenceCard”.</string>
+
+    <string name="anki_content_flag_always_on">Always-on marker (x)</string>
+    <string name="anki_content_flag_always_on_desc">Always emits \"x\". Use for template fields you want unconditionally enabled.</string>
+
+    <!-- Section headers for the source picker. -->
+    <string name="anki_content_section_content">Content</string>
+    <string name="anki_content_section_flag">Card type flag</string>
+
     <string name="cd_back">Back</string>
 
     <!-- Appearance — theme mode + accent picker -->
@@ -198,8 +299,9 @@
     <string name="deepl_settings_get_key_subtitle">The free plan includes 500,000 characters per month, but requires a credit card to sign up</string>
     <string name="deepl_settings_about">DeepL is a translation service known for high-quality output, especially in European languages.</string>
 
-    <!-- Translation Service section footer in Settings -->
+    <!-- Translation Service section footers in Settings -->
     <string name="tr_service_order_footer">Translations try each enabled service in the order shown, falling back when one is unavailable.</string>
+    <string name="tr_service_offline_footer">Offline translations are used as a fallback when online translations are unavailable. MLKit translations are bad, but the other options can be very slow and taxing, be weary of using them for auto translation.</string>
 
     <!-- Translation Service per-backend status line (line 2) -->
     <string name="tr_service_status_loading">Checking usage…</string>
@@ -208,6 +310,58 @@
 
     <!-- Backend quality labels (line 1 second half) -->
     <string name="tr_service_quality_bad">Bad quality</string>
+    <string name="tr_service_quality_okay">Okay quality</string>
     <string name="tr_service_quality_good">Good quality</string>
     <string name="tr_service_quality_better">Better quality</string>
+
+    <!-- Backend speed labels (line 1 third part — offline backends only) -->
+    <string name="tr_service_speed_very_slow">Very slow</string>
+    <string name="tr_service_speed_slow">Slow</string>
+    <string name="tr_service_speed_fast">Fast</string>
+
+    <!-- TranslateGemma backend (downloadable on-device 4B model) -->
+    <string name="translategemma_display_name">TranslateGemma</string>
+    <string name="translategemma_status_not_downloaded">Requires %1$s memory, %2$s on disk</string>
+    <string name="translategemma_status_downloaded_disabled">Downloaded but disabled (%1$s on disk)</string>
+    <string name="translategemma_status_ready">Requires %1$s memory, %2$s on disk</string>
+    <string name="translategemma_status_downloading">Downloading… %1$s of %2$s</string>
+    <string name="translategemma_status_verifying">Verifying download…</string>
+    <string name="translategemma_status_loading_model">Loading model…</string>
+    <string name="translategemma_disable_title">Disable TranslateGemma?</string>
+    <string name="translategemma_disable_message">The %1$s model is downloaded. You can keep it for later or delete it to free up space.</string>
+    <string name="translategemma_disable_keep">Disable only</string>
+    <string name="translategemma_disable_delete">Delete model</string>
+    <string name="translategemma_disable_cancel">Cancel</string>
+    <string name="translategemma_download_failed">Download failed: %1$s</string>
+    <string name="translategemma_insufficient_memory">This device doesn\'t have enough memory to run TranslateGemma.</string>
+    <string name="translategemma_insufficient_storage">Not enough free storage. TranslateGemma needs %1$s free.</string>
+    <string name="translategemma_metered_warning_title">Download on cellular?</string>
+    <string name="translategemma_metered_warning_message">TranslateGemma is %1$s. Continue on cellular?</string>
+    <string name="translategemma_download_paused">Download paused. Reopen Settings to resume.</string>
+
+    <string name="qwen_display_name">Qwen 2.5 1.5B</string>
+    <string name="qwen_status_not_downloaded">Requires %1$s memory, %2$s on disk</string>
+    <string name="qwen_status_downloaded_disabled">Downloaded but disabled (%1$s on disk)</string>
+    <string name="qwen_status_ready">Requires %1$s memory, %2$s on disk</string>
+    <string name="qwen_status_downloading">Downloading… %1$s of %2$s</string>
+    <string name="qwen_status_verifying">Verifying download…</string>
+    <string name="qwen_status_loading_model">Loading model…</string>
+    <string name="qwen_disable_title">Disable Qwen?</string>
+    <string name="qwen_disable_message">The %1$s model is downloaded. You can keep it for later or delete it to free up space.</string>
+    <string name="qwen_disable_keep">Disable only</string>
+    <string name="qwen_disable_delete">Delete model</string>
+    <string name="qwen_disable_cancel">Cancel</string>
+    <string name="qwen_download_failed">Download failed: %1$s</string>
+    <string name="qwen_insufficient_memory">This device doesn\'t have enough memory to run Qwen.</string>
+    <string name="qwen_insufficient_storage">Not enough free storage. Qwen needs %1$s free.</string>
+    <string name="qwen_metered_warning_title">Download on cellular?</string>
+    <string name="qwen_metered_warning_message">Qwen 2.5 1.5B is %1$s. Continue on cellular?</string>
+    <string name="qwen_download_paused">Download paused. Reopen Settings to resume.</string>
+
+    <!-- Status line shown on a TG / Qwen row when the device's hardware can't
+         run on-device LLMs. The row stays visible (so the user understands
+         which feature is disabled and why) but the toggle switch is hidden
+         and the row is not interactive. -->
+    <string name="llm_hardware_unsupported_arm64">Not supported on this device (requires an arm64 CPU)</string>
+    <string name="llm_hardware_unsupported_ram">Not supported on this device (requires at least %1$d GB RAM)</string>
 </resources>

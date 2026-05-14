@@ -1,7 +1,21 @@
 package com.playtranslate.ui
 
+import android.util.Log
 import com.playtranslate.dictionary.Deinflector
 import com.playtranslate.language.SourceLangId
+
+private const val TAG = "SentenceFurigana"
+
+/**
+ * Word-break-opportunity element used as an invisible separator between
+ * each kanji bracket and its neighbouring kana. Anki's furigana regex
+ * (` ?([^ >]+?)\[(.+?)\]`) can't span across `<wbr>` because the `>` is
+ * excluded from `[^ >]`. Browsers render the element as zero-width
+ * whitespace so the card has no visible inter-word spaces. Migaku's
+ * `support.html` parser is expected (but not yet verified on a real
+ * card) to treat `<wbr>` as a DOM-level word boundary.
+ */
+private const val WBR = "<wbr>"
 
 /**
  * Shared HTML builder for sentence-mode Anki cards.
@@ -85,7 +99,10 @@ object SentenceAnkiHtmlBuilder {
         val sorted = if (highlightedWords.isNotEmpty()) {
             words.sortedByDescending { it.word in highlightedWords }
         } else words
-        val wordsHtml = buildWordsHtml(sorted, highlightedWords)
+        // Legacy back HTML wraps a <style> block that defines the gl-*
+        // classes. classStyler emits class refs that the surrounding
+        // <style> applies — no inline duplication.
+        val wordsHtml = buildWordsHtmlWith(sorted, highlightedWords, classStyler)
         return buildString {
             append("<style>")
             append("body{visibility:hidden!important;white-space:normal!important;}")
@@ -185,30 +202,324 @@ object SentenceAnkiHtmlBuilder {
 
     fun starsString(score: Int) = "\u2605".repeat(score)
 
-    private fun buildWordsHtml(
+    /**
+     * Emits the SENTENCE field value: plain Japanese text with `<b>`
+     * around each highlighted-word surface form. For template fields
+     * rendered raw via `{{Sentence}}` \u2014 JPMN renders Sentence that way
+     * on every card type \u2014 putting bracket syntax here shows literal
+     * `[reading]` markup. The bracketed variant lives in
+     * [buildSentenceFurigana] / SENTENCE_FURIGANA for furigana-filtered
+     * fields.
+     *
+     * Highlight resolution: each entry in [highlightedWords] is a
+     * dictionary form. We resolve to the matching
+     * [WordEntry.surfaceForm] when the word is conjugated (so \u5012\u308c\u3066\u3044\u308b
+     * stays bold in the sentence, not the un-inflected \u5012\u308c\u308b). When no
+     * surfaceForm exists, falls back to the dictionary form verbatim.
+     * Newlines collapse to `<br>`.
+     */
+    fun buildSentencePlain(
+        text: String,
         words: List<WordEntry>,
-        highlightedWords: Set<String> = emptySet()
+        highlightedWords: Set<String>,
+    ): String {
+        val targets = resolveHighlightTargets(words, highlightedWords)
+        val sb = StringBuilder()
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\n' || c == '\r') {
+                sb.append("<br>")
+                i++
+                while (i < text.length && (text[i] == '\n' || text[i] == '\r')) i++
+                continue
+            }
+            val hit = targets.firstOrNull { text.startsWith(it, i) }
+            if (hit != null) {
+                sb.append("<b>").append(hit).append("</b>")
+                i += hit.length
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Emits the SENTENCE_FURIGANA field value: Anki-native furigana
+     * brackets (`kanji[reading]`) for Japanese with each kanji bracket
+     * **isolated by `<wbr>` separators**. Plain text passthrough for
+     * everything else.
+     *
+     * The goal is to match the semantics of PT's existing furigana
+     * display (DictionaryManager.tokenizeForFurigana / FuriganaSpan
+     * in TranslationResultFragment): furigana floats above ONLY the
+     * kanji surface, never the okurigana. Tap \u805e in \u805e\u3044\u305f \u2192 see \u304d
+     * (not \u304d\u3044, not \u304d\u3044\u305f).
+     *
+     * **Why `<wbr>` is the right separator.** Two downstream
+     * consumers each need a boundary signal between bracket-words
+     * and the kana that follows, and they need it in formats that
+     * don't show up as visible whitespace in the rendered card:
+     *
+     *  1. **Anki's `{{furigana:}}` filter** regex
+     *     ` ?([^ >]+?)\[(.+?)\]` reads everything before `[` (except
+     *     space and `>`) as the ruby base. `<wbr>` works as an
+     *     anchor because the trailing `>` in the tag is excluded
+     *     from the `[^ >]` character class \u2014 the regex can't span
+     *     across a `<wbr>` into the next bracket's base. So inserting
+     *     `<wbr>` between bracket-words gives each kanji its own
+     *     correct ruby base without inserting a visible space.
+     *
+     *  2. **Migaku's `support.html` parser** treats everything from
+     *     a kanji bracket until the next whitespace as the "word",
+     *     and surfaces `reading + word_post` in its tap-popup.
+     *     `<wbr>` is a standard HTML word-break-opportunity element;
+     *     if Migaku's parser is DOM-aware it treats `<wbr>` as a
+     *     word boundary. (If Migaku uses a `\s` raw-text regex
+     *     instead, `<wbr>` is literal text and this won't fix
+     *     Migaku's popup \u2014 to be verified on the user's device.)
+     *
+     * `<wbr>` renders as zero-width in HTML, so the rendered card
+     * has natural Japanese text with no visible inter-word spaces \u2014
+     * works cleanly on Lapis, JPMN, custom templates, and Migaku
+     * alike (assuming Migaku's DOM-awareness pans out).
+     *
+     * Examples:
+     *  - \u805e\u3044\u305f       \u2192 `\u805e[\u304d]<wbr>\u3044\u305f`
+     *  - \u53cb\u9054\u306b\u805e\u3044\u305f \u2192 `\u53cb\u9054[\u3068\u3082\u3060\u3061]<wbr>\u306b<wbr>\u805e[\u304d]<wbr>\u3044\u305f`
+     *  - \u4eca\u5ea6\u306fC      \u2192 `\u4eca\u5ea6[\u3053\u3093\u3069]<wbr>\u306fC`
+     *  - \u53d6\u308a\u51fa\u3059     \u2192 `\u53d6[\u3068]<wbr>\u308a<wbr>\u51fa[\u3060]<wbr>\u3059`
+     *
+     * Non-Japanese languages: plain text passthrough (newlines \u2192
+     * `<br>`). ZH pinyin annotation would need a different
+     * per-character source (follow-up).
+     */
+    fun buildSentenceFurigana(
+        text: String,
+        words: List<WordEntry> = emptyList(),
+        highlightedWords: Set<String> = emptySet(),
+        sourceLangId: SourceLangId = SourceLangId.JA,
+    ): String {
+        if (sourceLangId != SourceLangId.JA) return plainBody(text)
+        val targets = resolveHighlightTargets(words, highlightedWords)
+        // Anchor kanji-bearing Kuromoji tokens to their start offsets
+        // in the source text. We walk the source character-by-character
+        // below; this index tells us "at position i, expand the next N
+        // chars into a furigana bracket using the cached reading."
+        // Pure-kana tokens, whitespace, and punctuation are NOT indexed
+        // and just get copied through from the source. That keeps the
+        // builder source-text-canonical (matching buildSentencePlain)
+        // and removes the dependency on Kuromoji emitting whitespace as
+        // tokens — newlines turn into `<br>` because we see them
+        // directly in `text`, not because Kuromoji happened to surface
+        // them.
+        val kanjiTokenAt = indexKanjiTokensByStart(text)
+        val sb = StringBuilder()
+        var i = 0
+        // Inclusive char offset where the active <b> span should close;
+        // -1 when we're not inside a bold span. Targets are matched at
+        // their start positions only; we leave the closing tag on the
+        // step whose post-emit cursor reaches or passes the target's
+        // end. Surface forms in `words` come from Kuromoji-aligned
+        // lookups so off-boundary targets shouldn't happen in practice.
+        var boldCloseAt = -1
+        while (i < text.length) {
+            if (boldCloseAt < 0) {
+                val hit = targets.firstOrNull { text.startsWith(it, i) }
+                if (hit != null) {
+                    sb.append("<b>")
+                    boldCloseAt = i + hit.length
+                }
+            }
+            val token = kanjiTokenAt[i]
+            if (token != null) {
+                emitFuriganaParts(sb, token.surface, token.reading!!)
+                i += token.surface.length
+            } else {
+                val c = text[i]
+                if (c == '\n' || c == '\r') {
+                    sb.append("<br>")
+                    i++
+                    while (i < text.length && (text[i] == '\n' || text[i] == '\r')) i++
+                } else {
+                    sb.append(c)
+                    i++
+                }
+            }
+            if (boldCloseAt in 0..i) {
+                sb.append("</b>")
+                boldCloseAt = -1
+            }
+        }
+        if (boldCloseAt >= 0) sb.append("</b>")
+        val out = stripBoundarySeparators(sb.toString())
+        Log.d(TAG, "buildSentenceFurigana: in='$text' out='$out'")
+        return out
+    }
+
+    /**
+     * Anchors each kanji-bearing Kuromoji token to its start offset in
+     * the source text. Greedy left-to-right via `indexOf`, advancing
+     * the scan past each match so duplicate surfaces (e.g. two の's)
+     * are claimed in tokenization order. Tokens whose surface doesn't
+     * appear in source — which can happen if Kuromoji normalises
+     * characters — are skipped silently; we'd rather drop the bracket
+     * than emit it at the wrong position.
+     */
+    private fun indexKanjiTokensByStart(text: String): Map<Int, Deinflector.ReadingToken> {
+        val out = mutableMapOf<Int, Deinflector.ReadingToken>()
+        var scanPos = 0
+        for (token in Deinflector.tokenizeWithReadings(text)) {
+            val start = text.indexOf(token.surface, scanPos)
+            if (start < 0) continue
+            if (token.hasKanji && !token.reading.isNullOrEmpty()) {
+                out[start] = token
+            }
+            scanPos = start + token.surface.length
+        }
+        return out
+    }
+
+    /**
+     * Emits one `<wbr>kanji[reading]<wbr>` bracket per per-kanji
+     * splitFurigana part, with okurigana / internal kana written
+     * through as plain text. Shared by the sentence and expression
+     * builders.
+     */
+    private fun emitFuriganaParts(sb: StringBuilder, surface: String, reading: String) {
+        for (part in Deinflector.splitFurigana(surface, reading)) {
+            val r = part.reading
+            if (r != null) {
+                sb.append(WBR).append(part.text).append('[').append(r).append(']').append(WBR)
+            } else {
+                appendPlain(sb, part.text)
+            }
+        }
+    }
+
+    /**
+     * Resolves [highlightedWords] (dictionary forms) to the actual
+     * surface forms present in [text], using each [WordEntry]'s
+     * recorded surfaceForm when available. Sorted longest-first so a
+     * longer target wins when multiple targets share a prefix. Shared
+     * by `buildSentencePlain` and `buildSentenceFurigana`.
+     */
+    private fun resolveHighlightTargets(
+        words: List<WordEntry>,
+        highlightedWords: Set<String>,
+    ): List<String> = buildSet {
+        highlightedWords.forEach { dict ->
+            if (dict.isEmpty()) return@forEach
+            val surfaces = words.asSequence()
+                .filter { it.word == dict && it.surfaceForm.isNotEmpty() }
+                .map { it.surfaceForm }
+                .toList()
+            if (surfaces.isEmpty()) add(dict) else addAll(surfaces)
+        }
+    }.toList().sortedByDescending { it.length }
+
+    /**
+     * Emits the EXPRESSION field value for word-mode (single-word)
+     * sends: per-kanji furigana brackets with the same `<wbr>`
+     * isolation rule as [buildSentenceFurigana]. The caller already
+     * knows the headword's dictionary form + reading so we skip
+     * Kuromoji and per-kanji-split via [Deinflector.splitFurigana].
+     *
+     * Examples:
+     *  - \u805e\u304f     \u2192 `\u805e[\u304d]<wbr>\u304f`
+     *  - \u53d6\u308a\u51fa\u3059 \u2192 `\u53d6[\u3068]<wbr>\u308a<wbr>\u51fa[\u3060]<wbr>\u3059`
+     */
+    fun buildExpressionFurigana(
+        word: String,
+        reading: String,
+        sourceLangId: SourceLangId = SourceLangId.JA,
+    ): String {
+        if (sourceLangId != SourceLangId.JA || reading.isEmpty()) return word
+        if (!word.any(::isKanjiChar)) return word
+        val sb = StringBuilder()
+        emitFuriganaParts(sb, word, reading)
+        val out = stripBoundarySeparators(sb.toString())
+        Log.d(TAG, "buildExpressionFurigana: word='$word' reading='$reading' out='$out'")
+        return out
+    }
+
+    /**
+     * Removes a leading or trailing `<wbr>` from the field-level
+     * output. A boundary `<wbr>` does no work \u2014 there's no preceding
+     * or following content for it to separate \u2014 and the slight
+     * payload bloat is unhelpful.
+     */
+    private fun stripBoundarySeparators(s: String): String {
+        var result = s
+        if (result.startsWith(WBR)) result = result.substring(WBR.length)
+        if (result.endsWith(WBR)) result = result.substring(0, result.length - WBR.length)
+        return result
+    }
+
+    private fun isKanjiChar(c: Char): Boolean =
+        c in '\u4e00'..'\u9fff' || c in '\u3400'..'\u4dbf'
+
+    private fun plainBody(text: String): String {
+        val sb = StringBuilder()
+        appendPlain(sb, text)
+        return sb.toString()
+    }
+
+    private fun appendPlain(sb: StringBuilder, text: String) {
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\n' || c == '\r') {
+                sb.append("<br>")
+                i++
+                while (i < text.length && (text[i] == '\n' || text[i] == '\r')) i++
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+    }
+
+    /**
+     * Builds the per-word HTML table used at the bottom of the legacy
+     * v004 back-side AND in the structured-path WORDS_TABLE output. The
+     * [styler] callback decides whether each element carries a `class=""`
+     * (legacy path, with the `<style>` block in the surrounding card
+     * supplying CSS) or an inline `style=""` (structured path, no
+     * surrounding CSS available). `internal` so [AnkiCardOutputBuilder]
+     * can pass [inlineStyler] for the structured path.
+     */
+    internal fun buildWordsHtmlWith(
+        words: List<WordEntry>,
+        highlightedWords: Set<String>,
+        styler: HtmlStyler,
     ): String {
         if (words.isEmpty()) return ""
         val sb = StringBuilder()
         words.forEach { entry ->
             val isHighlighted = entry.word in highlightedWords
             if (isHighlighted) {
-                sb.append("<div class=\"gl-hl-bg\" style=\"margin-bottom:14px;border-radius:6px;padding:8px 10px;\">")
-                sb.append("<div class=\"gl-hl\"><b>${entry.word}</b></div>")
+                sb.append("<div ${styler("gl-hl-bg", "margin-bottom:14px;border-radius:6px;padding:8px 10px;")}>")
+                sb.append("<div ${styler("gl-hl", "")}><b>${entry.word}</b></div>")
             } else {
-                sb.append("<div style=\"margin-bottom:14px;\">")
+                sb.append("<div ${styler(null, "margin-bottom:14px;")}>")
                 sb.append("<div><b>${entry.word}</b></div>")
             }
             if (entry.reading.isNotEmpty() || entry.freqScore > 0) {
-                sb.append("<div style=\"font-size:0.85em;\">")
-                if (entry.reading.isNotEmpty()) sb.append("<span class=\"gl-hint\">${entry.reading}</span>")
-                if (entry.freqScore > 0) sb.append(" <span style=\"color:#606060;\">${starsString(entry.freqScore)}</span>")
+                sb.append("<div ${styler(null, "font-size:0.85em;")}>")
+                if (entry.reading.isNotEmpty()) {
+                    sb.append("<span ${styler("gl-hint", "")}>${entry.reading}</span>")
+                }
+                if (entry.freqScore > 0) {
+                    sb.append(" <span ${styler(null, "color:#606060;")}>${starsString(entry.freqScore)}</span>")
+                }
                 sb.append("</div>")
             }
-            val style = if (isHighlighted) "margin-left:10px;font-weight:bold;" else "margin-left:10px;"
+            val extra = if (isHighlighted) "margin-left:10px;font-weight:bold;" else "margin-left:10px;"
             entry.meaning.split("\n").filter { it.isNotBlank() }.forEach { line ->
-                sb.append("<div class=\"gl-secondary\" style=\"$style\">$line</div>")
+                sb.append("<div ${styler("gl-secondary", extra)}>$line</div>")
             }
             sb.append("</div>")
         }

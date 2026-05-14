@@ -16,6 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.lifecycleScope
 import com.playtranslate.AnkiManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.playtranslate.Prefs
 import com.playtranslate.PlayTranslateAccessibilityService
 import com.playtranslate.capturableDisplays
@@ -108,6 +110,8 @@ class SettingsBottomSheet : DialogFragment() {
         // is unregistered, so onResume is the catch-up point.
         renderer?.refreshDeeplBackendSwitch()
         renderer?.refreshLingvaBackendSwitch()
+        renderer?.refreshTranslategemmaSwitch()
+        renderer?.refreshQwenSwitch()
         // Always re-render every backend's status line on resume — picks
         // up new DeepL keys, freshly toggled state, and triggers a usage
         // re-fetch (the call doesn't consume DeepL characters).
@@ -138,9 +142,38 @@ class SettingsBottomSheet : DialogFragment() {
                     renderer?.refreshAllBackendStatuses()
                     com.playtranslate.CaptureService.instance?.reconcileBackendPreference()
                 }
+                Prefs.KEY_TRANSLATEGEMMA_ENABLED -> {
+                    renderer?.refreshTranslategemmaSwitch()
+                    renderer?.refreshAllBackendStatuses()
+                    com.playtranslate.CaptureService.instance?.reconcileBackendPreference()
+                    maybeUnloadOnDeviceLlmIfBothDisabled(ctx)
+                }
+                Prefs.KEY_QWEN_ENABLED -> {
+                    renderer?.refreshQwenSwitch()
+                    renderer?.refreshAllBackendStatuses()
+                    com.playtranslate.CaptureService.instance?.reconcileBackendPreference()
+                    maybeUnloadOnDeviceLlmIfBothDisabled(ctx)
+                }
             }
         }
         sp.registerOnSharedPreferenceChangeListener(prefsListener)
+    }
+
+    /** When the user disables BOTH on-device LLM backends, drop the loaded
+     *  model from native memory. Frees ~300-400 MB of KV cache + scratch
+     *  immediately and lets the kernel reclaim the mmap'd weight pages. If
+     *  only one backend is disabled, the singleton stays loaded for the other.
+     *
+     *  Mutex-serialized inside [LlamaTranslator.unloadModel] — won't race with
+     *  any in-flight translation triggered just before the toggle changed. */
+    private fun maybeUnloadOnDeviceLlmIfBothDisabled(ctx: Context) {
+        val prefs = Prefs(ctx)
+        if (!prefs.translateGemmaEnabled && !prefs.qwenEnabled) {
+            viewLifecycleOwner.lifecycleScope.launch {
+                com.playtranslate.translation.translategemma.LlamaTranslator
+                    .getInstance(ctx).unloadModel()
+            }
+        }
     }
 
     override fun onPause() {
@@ -226,6 +259,23 @@ class SettingsBottomSheet : DialogFragment() {
                 override fun openDeepLSettings() {
                     startActivity(android.content.Intent(requireContext(), DeepLSettingsActivity::class.java))
                 }
+                override fun startTranslateGemmaDownload() {
+                    showTranslateGemmaDownloadDialog()
+                }
+                override fun showTranslateGemmaDisableDialog() {
+                    this@SettingsBottomSheet.showTranslateGemmaDisableDialog()
+                }
+                override fun startQwenDownload() {
+                    showQwenDownloadDialog()
+                }
+                override fun showQwenDisableDialog() {
+                    this@SettingsBottomSheet.showQwenDisableDialog()
+                }
+                override fun onUpdateLanguagePacksTapped(
+                    stalePacks: List<com.playtranslate.language.StalePack>
+                ) {
+                    this@SettingsBottomSheet.startPackUpgrade(stalePacks)
+                }
                 override fun showHotkeyDialog(
                     title: String?, onSet: (List<Int>) -> Unit, onCancel: () -> Unit
                 ) {
@@ -238,6 +288,72 @@ class SettingsBottomSheet : DialogFragment() {
                     val picker = AnkiDeckPickerDialog.newInstance()
                     picker.onDeckSelected = onDeckSelected
                     picker.show(childFragmentManager, AnkiDeckPickerDialog.TAG)
+                }
+                override fun showAnkiCardTypePicker(onPicked: () -> Unit) {
+                    // Settings doesn't know mode; use SENTENCE as the
+                    // default for Basic-shape detection. Mapping dialog
+                    // lets the user override per template anyway.
+                    val picker = AnkiCardTypePickerDialog.newInstance(CardMode.SENTENCE)
+                    picker.onCardTypePicked = { _, _ -> onPicked() }
+                    picker.show(childFragmentManager, AnkiCardTypePickerDialog.TAG)
+                }
+                override fun showAnkiCardTypeMapping(onSaved: () -> Unit) {
+                    val sheet = this@SettingsBottomSheet
+                    val ctx = sheet.requireContext()
+                    val prefs = Prefs(ctx)
+                    val pickedId = prefs.ankiModelId
+                    if (pickedId == -1L) return  // shouldn't be reachable; row's hidden
+                    sheet.viewLifecycleOwner.lifecycleScope.launch {
+                        val models = withContext(Dispatchers.IO) { AnkiManager(ctx).getModels() }
+                        if (models.isEmpty()) {
+                            // Empty list always means transient query /
+                            // permission failure — a working AnkiDroid
+                            // install always has built-in Basic + Cloze.
+                            // Don't destructively reset prefs; just
+                            // surface the error and let the user retry.
+                            // Same guard as dispatchSendToAnki.
+                            android.widget.Toast.makeText(
+                                ctx, R.string.anki_models_unavailable,
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                            return@launch
+                        }
+                        val picked = models.firstOrNull { it.id == pickedId }
+                        if (picked == null) {
+                            // Model genuinely disappeared (models is non-
+                            // empty, our id isn't in it). Fall back to
+                            // default and Toast.
+                            prefs.ankiModelId = -1L
+                            prefs.ankiModelName = ""
+                            android.widget.Toast.makeText(
+                                ctx, R.string.anki_card_type_stale_fallback,
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                            onSaved()
+                            return@launch
+                        }
+                        if (AnkiCardTypeMapper.isBasicShape(picked.fieldNames)) {
+                            // Basic-shape templates bypass the mapping
+                            // system entirely — dispatchSendToAnki routes
+                            // them through assembleBasicNote which
+                            // derives Front/Back from the send mode and
+                            // ignores any saved mapping. Don't open the
+                            // mapping dialog; explain instead.
+                            android.widget.Toast.makeText(
+                                ctx, R.string.anki_card_type_basic_no_mapping,
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                            return@launch
+                        }
+                        val dialog = AnkiFieldMappingDialog.newInstance(
+                            modelId = picked.id,
+                            modelName = picked.name,
+                            fieldNames = picked.fieldNames,
+                            mode = CardMode.SENTENCE,
+                        )
+                        dialog.onSaved = { _, _ -> onSaved() }
+                        dialog.show(childFragmentManager, AnkiFieldMappingDialog.TAG)
+                    }
                 }
                 override fun getScrollY(): Int = settingsScrollView.scrollY
             }
@@ -337,9 +453,35 @@ class SettingsBottomSheet : DialogFragment() {
 
     // ── Re-inflate (used for theme changes in dialog mode) ──────────────
 
+    /**
+     * Swaps the bottom-sheet's entire content view for a freshly-inflated
+     * [R.layout.dialog_settings]. Used for theme changes (MainActivity)
+     * and display hot-plug (this class's display listener).
+     *
+     * Skipped when:
+     *  - The fragment isn't attached or currentView has been detached.
+     *  - The parent is a FragmentContainerView. AndroidX's FCV refuses
+     *    raw View children — only Fragment-managed views. Showing any
+     *    child DialogFragment in this session (deck / card-type /
+     *    field-mapping / source picker) replaces the sheet's content
+     *    parent with an FCV, and that container persists for the rest
+     *    of the session — even after the dialog dismisses. So a
+     *    simple "is a child dialog currently shown" check isn't
+     *    enough; we have to look at what the parent actually is.
+     *
+     * The fresh layout is picked up next time Settings opens (its
+     * onViewCreated re-runs against a clean view tree).
+     */
     fun reinflateContent() {
+        if (!isAdded) return
         val old = currentView ?: return
         val parent = old.parent as? ViewGroup ?: return
+        if (parent is androidx.fragment.app.FragmentContainerView) {
+            android.util.Log.d(TAG,
+                "reinflateContent skipped — parent is FragmentContainerView " +
+                    "(a child DialogFragment was shown earlier this session)")
+            return
+        }
         val index = parent.indexOfChild(old)
         parent.removeView(old)
         val newView = LayoutInflater.from(requireActivity())
@@ -396,11 +538,403 @@ class SettingsBottomSheet : DialogFragment() {
         }, Handler(Looper.getMainLooper()))
     }
 
+    // ── TranslateGemma flow ─────────────────────────────────────────────
+
+    private var translategemmaDownloadJob: kotlinx.coroutines.Job? = null
+
+    /** Kick off [com.playtranslate.language.PackUpgradeOrchestrator] for the
+     *  user's deferred-upgrade list (the "Update language packs" cell tap).
+     *
+     *  Uses **the Activity's lifecycleScope**, NOT this Fragment's view scope:
+     *  the OverlayProgress dialog the orchestrator shows is attached to the
+     *  Activity's decorView, so it survives a Settings dismiss. Tying the
+     *  coroutine to the Fragment view would silently cancel the in-flight
+     *  download while the user stares at a frozen progress bar.
+     *
+     *  On completion, refreshes just the Language section so the cell hides
+     *  (since `staleInstalledPacks()` is now empty). Falls back gracefully
+     *  if the renderer/activity is gone by the time the orchestrator returns
+     *  (Settings dismissed mid-flight). */
+    private fun startPackUpgrade(
+        stalePacks: List<com.playtranslate.language.StalePack>
+    ) {
+        val activity = activity as? androidx.appcompat.app.AppCompatActivity ?: return
+        com.playtranslate.language.PackUpgradeOrchestrator(activity, activity.lifecycleScope)
+            .upgradeAll(stalePacks) {
+                if (isAdded && view != null) {
+                    runCatching { renderer?.refreshLanguageSection() }
+                }
+            }
+    }
+
+    /** Show the modal download dialog (OverlayProgress).
+     *  Drives a [com.playtranslate.translation.llm.OnDeviceLlmDownloader] configured
+     *  for TG from the bottom sheet's lifecycle scope — dismissing the sheet
+     *  cancels the coroutine but preserves the partial file (resume on next
+     *  attempt). The Cancel button explicitly deletes the partial file. */
+    private fun showTranslateGemmaDownloadDialog() {
+        val ctx = context ?: return
+        val backend = com.playtranslate.translation.TranslationBackendRegistry
+            .byId("translategemma") as? com.playtranslate.translation.llm.OnDeviceLlmBackend
+            ?: return
+        val downloader = com.playtranslate.translation.llm.OnDeviceLlmDownloader(
+            context = ctx,
+            modelHelper = com.playtranslate.translation.translategemma.TranslateGemmaModel,
+            totalMemFloorBytes = backend.totalMemFloorBytes,
+        )
+
+        // Metered-network warning before kicking off the multi-GB download.
+        if (downloader.isCurrentNetworkMetered()) {
+            val sizeStr = com.playtranslate.translation.translategemma
+                .TranslateGemmaModel.humanSize(ctx)
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle(R.string.translategemma_metered_warning_title)
+                .setMessage(getString(R.string.translategemma_metered_warning_message, sizeStr))
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    runTranslateGemmaDownload(ctx, downloader)
+                }
+                .setNegativeButton(android.R.string.cancel) { _, _ -> }
+                .show()
+            return
+        }
+        runTranslateGemmaDownload(ctx, downloader)
+    }
+
+    private fun runTranslateGemmaDownload(
+        ctx: Context,
+        downloader: com.playtranslate.translation.llm.OnDeviceLlmDownloader,
+    ) {
+        val activity = activity ?: return
+        val sizeStr = com.playtranslate.translation.translategemma
+            .TranslateGemmaModel.humanSize(ctx)
+
+        // Reference captured into the cancel callback below; the dialog is
+        // assigned right after via the Builder, then mutated as the download
+        // progresses.
+        var dialog: OverlayProgress? = null
+        dialog = OverlayProgress.Builder(ctx)
+            .setTitle(getString(R.string.translategemma_display_name))
+            .setMessage(getString(R.string.translategemma_status_downloading, "0 B", sizeStr))
+            .setProgress(0)
+            .setOnCancel {
+                translategemmaDownloadJob?.cancel()
+                // Explicit cancel deletes the partial file (no resume on next attempt).
+                downloader.deletePartial()
+                renderer?.refreshAllBackendStatuses()
+            }
+            .showInActivity(activity)
+
+        translategemmaDownloadJob = viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val outcome = downloader.run { progress ->
+                    requireActivity().runOnUiThread {
+                        when (progress) {
+                            is com.playtranslate.translation.llm
+                                .OnDeviceLlmDownloader.Progress.Downloading -> {
+                                val recv = com.playtranslate.translation.llm
+                                    .humanSize(progress.received)
+                                val total = com.playtranslate.translation.llm
+                                    .humanSize(progress.total)
+                                dialog?.setMessage(getString(
+                                    R.string.translategemma_status_downloading,
+                                    recv, total,
+                                ))
+                                if (progress.total > 0) {
+                                    dialog?.setProgress(
+                                        ((progress.received * 100) / progress.total).toInt()
+                                    )
+                                }
+                            }
+                            is com.playtranslate.translation.llm
+                                .OnDeviceLlmDownloader.Progress.Verifying -> {
+                                dialog?.setMessage(getString(R.string.translategemma_status_verifying))
+                                dialog?.setProgress(100)
+                            }
+                        }
+                    }
+                }
+                if (!isAdded) return@launch
+                requireActivity().runOnUiThread {
+                    dialog?.dismiss()
+                    when (outcome) {
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Success -> {
+                            // Flip the pref → SP listener fires → switch + status refresh + reconcile.
+                            Prefs(ctx).translateGemmaEnabled = true
+                        }
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Refused -> {
+                            android.widget.Toast.makeText(
+                                ctx, outcome.reason, android.widget.Toast.LENGTH_LONG
+                            ).show()
+                            renderer?.refreshAllBackendStatuses()
+                        }
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Failed -> {
+                            android.widget.Toast.makeText(
+                                ctx,
+                                getString(R.string.translategemma_download_failed, outcome.reason),
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                            renderer?.refreshAllBackendStatuses()
+                        }
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Cancelled -> {
+                            // Partial file kept (lifecycle dismiss). Settings will say "Tap to download"
+                            // because isInstalled() is false — but next tap resumes from offset.
+                            android.widget.Toast.makeText(
+                                ctx, R.string.translategemma_download_paused,
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                            renderer?.refreshAllBackendStatuses()
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (isAdded) {
+                    requireActivity().runOnUiThread {
+                        dialog?.dismiss()
+                        android.widget.Toast.makeText(
+                            ctx,
+                            getString(R.string.translategemma_download_failed,
+                                e.message ?: e.javaClass.simpleName),
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                        renderer?.refreshAllBackendStatuses()
+                    }
+                }
+            } finally {
+                // OverlayProgress lives on activity.window.decorView, not the
+                // fragment view — a fragment-only lifecycle cancel (sheet
+                // dismissed mid-download) would otherwise leave the scrim
+                // stuck. dismiss() is idempotent so this is safe even after
+                // the success/outcome branches above already dismissed.
+                dialog?.dismiss()
+            }
+        }
+    }
+
+
+    /** OverlayAlert with three options when the user taps an enabled TG row.
+     *  Scrim-tap and Cancel both revert the optimistic switch flip via
+     *  [SettingsRenderer.refreshTranslategemmaSwitch]. */
+    private fun showTranslateGemmaDisableDialog() {
+        val ctx = context ?: return
+        val activity = activity ?: return
+        val oc = com.playtranslate.OverlayColors
+        val sizeStr = com.playtranslate.translation.translategemma
+            .TranslateGemmaModel.humanSize(ctx)
+        OverlayAlert.Builder(ctx)
+            .setTitle(getString(R.string.translategemma_disable_title))
+            .setMessage(getString(R.string.translategemma_disable_message, sizeStr))
+            .hideIcon()
+            .addButton(getString(R.string.translategemma_disable_keep), oc.accent(ctx)) {
+                // File kept; only the toggle flips. SP listener picks up the change.
+                Prefs(ctx).translateGemmaEnabled = false
+            }
+            .addButton(getString(R.string.translategemma_disable_delete), oc.divider(ctx), oc.danger(ctx)) {
+                Prefs(ctx).translateGemmaEnabled = false
+                com.playtranslate.translation.translategemma
+                    .TranslateGemmaModel.delete(ctx)
+                // Drop the loaded model from native memory too. Without this,
+                // the unlinked file's mmap'd pages remain valid and a subsequent
+                // re-download would serve stale weights from the previous mmap
+                // because LlamaTranslator.ensureLoaded matches on the path string
+                // (which is unchanged after delete + re-download to the same
+                // FILENAME). See Codex adversarial-review Finding #1.
+                viewLifecycleOwner.lifecycleScope.launch {
+                    com.playtranslate.translation.translategemma.LlamaTranslator
+                        .getInstance(ctx).unloadModel()
+                }
+                renderer?.refreshAllBackendStatuses()
+            }
+            .addCancelButton { renderer?.refreshTranslategemmaSwitch() }
+            .showInActivity(activity)
+    }
+
+    // ── Qwen flow ───────────────────────────────────────────────────────
+
+    private var qwenDownloadJob: kotlinx.coroutines.Job? = null
+
+    /** Show the modal download dialog for Qwen. Mirrors
+     *  [showTranslateGemmaDownloadDialog] but with QwenModel + a 4 GB total-mem
+     *  floor (Qwen 1.5B fits comfortably below TG's 6 GB requirement). */
+    private fun showQwenDownloadDialog() {
+        val ctx = context ?: return
+        val backend = com.playtranslate.translation.TranslationBackendRegistry
+            .byId("qwen") as? com.playtranslate.translation.llm.OnDeviceLlmBackend
+            ?: return
+        val downloader = com.playtranslate.translation.llm.OnDeviceLlmDownloader(
+            context = ctx,
+            modelHelper = com.playtranslate.translation.qwen.QwenModel,
+            totalMemFloorBytes = backend.totalMemFloorBytes,
+        )
+
+        if (downloader.isCurrentNetworkMetered()) {
+            val sizeStr = com.playtranslate.translation.qwen.QwenModel.humanSize(ctx)
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle(R.string.qwen_metered_warning_title)
+                .setMessage(getString(R.string.qwen_metered_warning_message, sizeStr))
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    runQwenDownload(ctx, downloader)
+                }
+                .setNegativeButton(android.R.string.cancel) { _, _ -> }
+                .show()
+            return
+        }
+        runQwenDownload(ctx, downloader)
+    }
+
+    private fun runQwenDownload(
+        ctx: Context,
+        downloader: com.playtranslate.translation.llm.OnDeviceLlmDownloader,
+    ) {
+        val activity = activity ?: return
+        val sizeStr = com.playtranslate.translation.qwen.QwenModel.humanSize(ctx)
+
+        var dialog: OverlayProgress? = null
+        dialog = OverlayProgress.Builder(ctx)
+            .setTitle(getString(R.string.qwen_display_name))
+            .setMessage(getString(R.string.qwen_status_downloading, "0 B", sizeStr))
+            .setProgress(0)
+            .setOnCancel {
+                qwenDownloadJob?.cancel()
+                downloader.deletePartial()
+                renderer?.refreshAllBackendStatuses()
+            }
+            .showInActivity(activity)
+
+        qwenDownloadJob = viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val outcome = downloader.run { progress ->
+                    requireActivity().runOnUiThread {
+                        when (progress) {
+                            is com.playtranslate.translation.llm
+                                .OnDeviceLlmDownloader.Progress.Downloading -> {
+                                val recv = com.playtranslate.translation.llm
+                                    .humanSize(progress.received)
+                                val total = com.playtranslate.translation.llm
+                                    .humanSize(progress.total)
+                                dialog?.setMessage(getString(
+                                    R.string.qwen_status_downloading,
+                                    recv, total,
+                                ))
+                                if (progress.total > 0) {
+                                    dialog?.setProgress(
+                                        ((progress.received * 100) / progress.total).toInt()
+                                    )
+                                }
+                            }
+                            is com.playtranslate.translation.llm
+                                .OnDeviceLlmDownloader.Progress.Verifying -> {
+                                dialog?.setMessage(getString(R.string.qwen_status_verifying))
+                                dialog?.setProgress(100)
+                            }
+                        }
+                    }
+                }
+                if (!isAdded) return@launch
+                requireActivity().runOnUiThread {
+                    dialog?.dismiss()
+                    when (outcome) {
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Success -> {
+                            Prefs(ctx).qwenEnabled = true
+                        }
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Refused -> {
+                            android.widget.Toast.makeText(
+                                ctx, outcome.reason, android.widget.Toast.LENGTH_LONG
+                            ).show()
+                            renderer?.refreshAllBackendStatuses()
+                        }
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Failed -> {
+                            android.widget.Toast.makeText(
+                                ctx,
+                                getString(R.string.qwen_download_failed, outcome.reason),
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                            renderer?.refreshAllBackendStatuses()
+                        }
+                        is com.playtranslate.translation.llm
+                            .OnDeviceLlmDownloader.Outcome.Cancelled -> {
+                            android.widget.Toast.makeText(
+                                ctx, R.string.qwen_download_paused,
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                            renderer?.refreshAllBackendStatuses()
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (isAdded) {
+                    requireActivity().runOnUiThread {
+                        dialog?.dismiss()
+                        android.widget.Toast.makeText(
+                            ctx,
+                            getString(R.string.qwen_download_failed,
+                                e.message ?: e.javaClass.simpleName),
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                        renderer?.refreshAllBackendStatuses()
+                    }
+                }
+            } finally {
+                // See translategemma flow above — OverlayProgress sits on
+                // activity decor, so a fragment-only lifecycle cancel
+                // bypasses the inner dismisses. Idempotent late dismiss
+                // catches the !isAdded return and CancellationException
+                // paths.
+                dialog?.dismiss()
+            }
+        }
+    }
+
+    /** OverlayAlert with three options when the user taps an enabled Qwen row.
+     *  Scrim-tap and Cancel both revert the optimistic switch flip via
+     *  [SettingsRenderer.refreshQwenSwitch]. */
+    private fun showQwenDisableDialog() {
+        val ctx = context ?: return
+        val activity = activity ?: return
+        val oc = com.playtranslate.OverlayColors
+        val sizeStr = com.playtranslate.translation.qwen.QwenModel.humanSize(ctx)
+        OverlayAlert.Builder(ctx)
+            .setTitle(getString(R.string.qwen_disable_title))
+            .setMessage(getString(R.string.qwen_disable_message, sizeStr))
+            .hideIcon()
+            .addButton(getString(R.string.qwen_disable_keep), oc.accent(ctx)) {
+                Prefs(ctx).qwenEnabled = false
+            }
+            .addButton(getString(R.string.qwen_disable_delete), oc.divider(ctx), oc.danger(ctx)) {
+                Prefs(ctx).qwenEnabled = false
+                com.playtranslate.translation.qwen.QwenModel.delete(ctx)
+                // See translategemma_disable_delete branch above for why we
+                // also unload the native model on file delete.
+                viewLifecycleOwner.lifecycleScope.launch {
+                    com.playtranslate.translation.translategemma.LlamaTranslator
+                        .getInstance(ctx).unloadModel()
+                }
+                renderer?.refreshAllBackendStatuses()
+            }
+            .addCancelButton { renderer?.refreshQwenSwitch() }
+            .showInActivity(activity)
+    }
+
     // ── Companion ───────────────────────────────────────────────────────
 
     companion object {
         const val TAG = "SettingsBottomSheet"
         private const val ARG_HIDE_DISMISS = "hide_dismiss"
+
+        // (TG and Qwen total-mem floors used to live here as TG_TOTAL_MEM_FLOOR_BYTES
+        // and QWEN_TOTAL_MEM_FLOOR_BYTES, but they're now properties on the backend
+        // class itself — see OnDeviceLlmBackend.totalMemFloorBytes — so the UI's
+        // hardware-gate logic and the downloader's preflight read the same source.)
 
         fun newInstance(hideDismiss: Boolean = false) = SettingsBottomSheet().apply {
             if (hideDismiss) arguments = Bundle().apply { putBoolean(ARG_HIDE_DISMISS, true) }

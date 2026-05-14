@@ -8,13 +8,38 @@ import com.playtranslate.diagnostics.CrashHandler
 import com.playtranslate.translation.DeepLBackend
 import com.playtranslate.translation.LingvaBackend
 import com.playtranslate.translation.MlKitBackend
+import com.playtranslate.translation.QwenBackend
+import com.playtranslate.translation.TranslateGemmaBackend
 import com.playtranslate.translation.TranslationBackendRegistry
+import com.playtranslate.translation.translategemma.LlamaTranslator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.lang.ref.WeakReference
 
 class PlayTranslateApplication : Application() {
+
+    /** Application-scoped coroutine scope for fire-and-forget background work
+     *  (onTrimMemory unloads, etc.). Outlives any individual UI lifecycle.
+     *  IO dispatcher because LLM unload has to wait on the engine's
+     *  llamaDispatcher and shouldn't tie up the main thread. */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         CrashHandler.install(this)
+        // Push the persisted grouping-debug flag into the process-wide
+        // OcrManager singleton before any OCR can run. The SettingsRenderer
+        // toggle also writes this on change, so the in-memory copy stays in
+        // sync with [Prefs.debugLogGrouping] without OcrManager holding a
+        // Context of its own. Gated on BuildConfig.DEBUG so a stale `true`
+        // value carried over from a debug build can't leak OCR text to
+        // logcat in a release upgrade — release builds also hide the Debug
+        // section, so there'd be no way to turn it back off.
+        if (BuildConfig.DEBUG) {
+            OcrManager.instance.debugLogGroupingEnabled = Prefs(this).debugLogGrouping
+        }
         // Build the translation-backend registry once at process start.
         // Backends are stateless or hold pooled HTTP clients that should
         // outlive a single CaptureService instance. The DeepL key is read
@@ -27,6 +52,14 @@ class PlayTranslateApplication : Application() {
                     enabledProvider = { Prefs(this).deeplEnabled },
                 ),
                 LingvaBackend(enabledProvider = { Prefs(this).lingvaEnabled }),
+                TranslateGemmaBackend(
+                    context         = this,
+                    enabledProvider = { Prefs(this).translateGemmaEnabled },
+                ),
+                QwenBackend(
+                    context         = this,
+                    enabledProvider = { Prefs(this).qwenEnabled },
+                ),
                 MlKitBackend(),
             )
         )
@@ -111,6 +144,17 @@ class PlayTranslateApplication : Application() {
         if (BuildConfig.DEBUG) return
         if (level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
             OcrManager.instance.releaseAll()
+            // Drop the on-device LLM model + KV cache / scratch (~300-400 MB
+            // of real allocations on top of mmap'd weights). At
+            // TRIM_MEMORY_COMPLETE we're at the top of the LRU kill list;
+            // freeing now might defer the kill, and if it doesn't we lose
+            // nothing. Mutex-serialized inside [LlamaTranslator.unloadModel]
+            // so it can't race an in-flight translate(). Async because the
+            // engine's cleanUp() does runBlocking on its own dispatcher and
+            // we don't want to ANR the main thread that delivered onTrimMemory.
+            appScope.launch {
+                LlamaTranslator.getInstance(this@PlayTranslateApplication).unloadModel()
+            }
         }
     }
 }

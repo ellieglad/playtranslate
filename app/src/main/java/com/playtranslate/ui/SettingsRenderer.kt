@@ -34,8 +34,10 @@ import com.google.android.material.materialswitch.MaterialSwitch
 import com.playtranslate.AnkiManager
 import com.playtranslate.BuildConfig
 import com.playtranslate.CaptureService
+import com.playtranslate.OcrManager
 import com.playtranslate.OverlayMode
 import com.playtranslate.PlayTranslateAccessibilityService
+import com.playtranslate.PlayTranslateTileService
 import com.playtranslate.Prefs
 import com.playtranslate.R
 import com.playtranslate.diagnostics.LogExporter
@@ -47,6 +49,7 @@ import com.playtranslate.compositeOver
 import com.playtranslate.themeColor
 import com.playtranslate.translation.BackendId
 import com.playtranslate.translation.BackendQuality
+import com.playtranslate.translation.BackendSpeed
 import com.playtranslate.translation.BackendStatus
 import com.playtranslate.translation.Tone
 import com.playtranslate.translation.TranslationBackend
@@ -86,13 +89,54 @@ class SettingsRenderer(
         fun openDeepLSettings()
         fun showHotkeyDialog(title: String?, onSet: (List<Int>) -> Unit, onCancel: () -> Unit)
         fun showAnkiDeckPicker(onDeckSelected: () -> Unit)
+        fun showAnkiCardTypePicker(onPicked: () -> Unit)
+        fun showAnkiCardTypeMapping(onSaved: () -> Unit)
         fun getScrollY(): Int
+
+        /** Tap on the TranslateGemma row when the model isn't installed.
+         *  Implementer shows the download progress dialog, runs the shared
+         *  [com.playtranslate.translation.llm.OnDeviceLlmDownloader] configured
+         *  for TG, and on success flips [Prefs.translateGemmaEnabled] = true
+         *  (which fires the pref-change listener → status refresh + reconcile). */
+        fun startTranslateGemmaDownload()
+
+        /** Tap on the TranslateGemma row when it's currently enabled.
+         *  Implementer shows the 3-option AlertDialog (Disable only / Delete
+         *  model / Cancel). The Cancel branch must call
+         *  [SettingsRenderer.refreshTranslategemmaSwitch] to revert the
+         *  switch state since the renderer optimistically flipped it. */
+        fun showTranslateGemmaDisableDialog()
+
+        /** Tap on the Qwen row when the model isn't installed. Mirrors
+         *  [startTranslateGemmaDownload] for the Qwen-configured
+         *  [com.playtranslate.translation.llm.OnDeviceLlmDownloader]. */
+        fun startQwenDownload()
+
+        /** Tap on the Qwen row when it's currently enabled. Mirrors
+         *  [showTranslateGemmaDisableDialog] for Qwen — the Cancel branch must
+         *  call [SettingsRenderer.refreshQwenSwitch] to revert the switch. */
+        fun showQwenDisableDialog()
+
+        /** Tap on the "Update language packs" row in the Language section.
+         *  Implementer instantiates [com.playtranslate.language.PackUpgradeOrchestrator]
+         *  and calls `upgradeAll(stalePacks)`. On completion, calls
+         *  [SettingsRenderer.refreshLanguageSection] so the cell hides
+         *  (since `staleInstalledPacks()` is now empty). Use the **Activity's**
+         *  lifecycleScope for the orchestrator coroutine — NOT the Fragment's
+         *  view lifecycle scope, which would cancel the in-flight download
+         *  while the OverlayProgress dialog (attached to the Activity's
+         *  decorView) keeps spinning. */
+        fun onUpdateLanguagePacksTapped(
+            stalePacks: List<com.playtranslate.language.StalePack>
+        )
     }
 
     // ── View references for refresh ─────────────────────────────────────
 
     private val rowSourceLang: View = root.findViewById(R.id.rowSourceLang)
     private val rowTargetLang: View = root.findViewById(R.id.rowTargetLang)
+    private val cardUpdateLanguagePacks: MaterialCardView = root.findViewById(R.id.cardUpdateLanguagePacks)
+    private val rowUpdateLanguagePacks: View = root.findViewById(R.id.rowUpdateLanguagePacks)
 
     private val cardOnScreenControls: MaterialCardView = root.findViewById(R.id.cardOnScreenControls)
     private val rowOverlayIcon: View = root.findViewById(R.id.rowOverlayIcon)
@@ -121,6 +165,10 @@ class SettingsRenderer(
     private val llAnkiGetApp: LinearLayout = root.findViewById(R.id.llAnkiGetApp)
     private val llAnkiPermission: LinearLayout = root.findViewById(R.id.llAnkiPermission)
     private val rowAnkiDeck: View = root.findViewById(R.id.rowAnkiDeck)
+    private val dividerAnkiCardType: View = root.findViewById(R.id.dividerAnkiCardType)
+    private val rowAnkiCardType: View = root.findViewById(R.id.rowAnkiCardType)
+    private val dividerAnkiEditMapping: View = root.findViewById(R.id.dividerAnkiEditMapping)
+    private val rowAnkiEditMapping: View = root.findViewById(R.id.rowAnkiEditMapping)
     private val tvAnkiSectionTitle: TextView = root.findViewById(R.id.tvAnkiSectionTitle)
 
     private val llThemeModePicker: LinearLayout = root.findViewById(R.id.llThemeModePicker)
@@ -160,7 +208,8 @@ class SettingsRenderer(
         setGroupHeader(R.id.headerAutoTranslate, "AUTO-TRANSLATE")
         setGroupHeader(R.id.headerHotkeys, "HOTKEYS")
         setGroupHeader(R.id.headerCaptureDisplay, "CAPTURE DISPLAY")
-        setGroupHeader(R.id.headerTranslationService, "TRANSLATION SERVICE")
+        setGroupHeader(R.id.headerOnlineTranslations, "ONLINE TRANSLATIONS")
+        setGroupHeader(R.id.headerOfflineTranslations, "OFFLINE TRANSLATIONS")
         setGroupHeader(R.id.headerAnki, "ANKI")
         setGroupHeader(R.id.headerAppearance, "APPEARANCE")
         setGroupHeader(R.id.headerSupport, "SUPPORT")
@@ -196,6 +245,52 @@ class SettingsRenderer(
         rowTargetLang.setOnClickListener {
             callbacks.openLanguageSetup(LanguageSetupActivity.MODE_TARGET)
         }
+
+        // "Update language packs" cell — its OWN MaterialCardView so the
+        // warning tint (background fill + stroke) doesn't bleed onto the
+        // Source/Target rows. Visible iff there are stale packs on disk
+        // (additive or force, mixed labeling). Subtitle is the same
+        // multi-line list the launch-time OverlayAlert uses.
+        val activity = root.context as? android.app.Activity
+        val stalePacks = if (activity != null) {
+            com.playtranslate.language.LanguagePackStore.staleInstalledPacks(activity)
+        } else {
+            emptyList()
+        }
+        if (stalePacks.isEmpty() || activity == null) {
+            cardUpdateLanguagePacks.visibility = View.GONE
+        } else {
+            cardUpdateLanguagePacks.visibility = View.VISIBLE
+            rowUpdateLanguagePacks.findViewById<TextView>(R.id.tvRowTitle).text =
+                root.context.getString(R.string.lang_section_update_packs_title)
+            rowUpdateLanguagePacks.findViewById<TextView>(R.id.tvRowSubtitle).text =
+                com.playtranslate.language.PackUpgradeOrchestrator
+                    .describeForAlert(activity, stalePacks)
+            rowUpdateLanguagePacks.setOnClickListener {
+                callbacks.onUpdateLanguagePacksTapped(stalePacks)
+            }
+            applyUpdatePacksWarningTint()
+        }
+    }
+
+    /** Tint the Update language packs card with the warning attention color
+     *  — same blend recipe (`blendColors(attention, baseCard, 0.20f)`) and
+     *  full-strength stroke that `refreshOnScreenControlsTint` uses for the
+     *  Game Screen Controls card in dual-screen mode when the floating-icon
+     *  switch is off. Conveys "this pack is degraded; tap to fix" with the
+     *  same visual weight as other recoverable-state warnings. */
+    private fun applyUpdatePacksWarningTint() {
+        val baseCard = ctx.themeColor(R.attr.ptCard)
+        val warning = ctx.themeColor(R.attr.ptWarning)
+        cardUpdateLanguagePacks.setCardBackgroundColor(blendColors(warning, baseCard, 0.20f))
+        cardUpdateLanguagePacks.strokeColor = warning
+    }
+
+    /** Public shim for the Settings cell callback to refresh the Language
+     *  section after the upgrade orchestrator completes. The cell hides when
+     *  staleInstalledPacks() is now empty. */
+    fun refreshLanguageSection() {
+        setupLanguageSection()
     }
 
     private fun resolveSourceName(): String =
@@ -244,8 +339,13 @@ class SettingsRenderer(
                     .show()
                 return@setOnCheckedChangeListener
             }
-            prefs.showOverlayIcon = checked
-            PlayTranslateAccessibilityService.instance?.reconcileFloatingIcons()
+            if (checked) {
+                prefs.showOverlayIcon = true
+                PlayTranslateAccessibilityService.instance?.reconcileFloatingIcons()
+                PlayTranslateTileService.TileSync.refresh(ctx)
+            } else {
+                PlayTranslateAccessibilityService.disable(ctx, "settings_toggle_off")
+            }
             refreshOnScreenControlsTint(isSingle)
         }
         rowOverlayIcon.setOnClickListener { switchOverlayIcon.toggle() }
@@ -697,6 +797,9 @@ class SettingsRenderer(
 
     private val rowBackendDeepl: View = root.findViewById(R.id.rowBackendDeepl)
     private val rowBackendLingva: View = root.findViewById(R.id.rowBackendLingva)
+    private val rowBackendTranslategemma: View = root.findViewById(R.id.rowBackendTranslategemma)
+    private val rowBackendQwen: View = root.findViewById(R.id.rowBackendQwen)
+    private val dividerBackendQwen: View = root.findViewById(R.id.dividerBackendQwen)
     private val rowBackendMlkit: View = root.findViewById(R.id.rowBackendMlkit)
 
     /** Per-backend in-flight `refreshStatus` job, keyed by [BackendId]. Used
@@ -718,6 +821,8 @@ class SettingsRenderer(
         )
 
         wireDeeplBackendRow()
+        wireTranslateGemmaBackendRow()
+        wireQwenBackendRow()
 
         // Compose line 1 for each backend from its metadata
         // (requiresInternet + quality), styled with mixed-color spans.
@@ -732,29 +837,33 @@ class SettingsRenderer(
     }
 
     /** Compose the row's line-1 subtitle from the backend's metadata —
-     *  `(internet requirement) · (quality)` — with each half tinted by
-     *  its own [Tone] via a [ForegroundColorSpan]. The TextView's base
-     *  color (set by the `Text.PT.RowSubtitle` style) handles the parts
-     *  we don't span. */
+     *  `(quality) · (speed)` for offline backends, just `(quality)` for
+     *  online — with each part tinted by its own [Tone] via a
+     *  [ForegroundColorSpan]. The TextView's base color (set by the
+     *  `Text.PT.RowSubtitle` style) handles parts we don't span. The
+     *  online/offline distinction itself is now carried by the section
+     *  header (Online vs Offline cards), not a per-row pill. */
     private fun setBackendLine1(row: View, backend: TranslationBackend) {
         val tv = row.findViewById<TextView>(R.id.tvRowSubtitle)
         val builder = SpannableStringBuilder()
 
-        val (internetText, internetTone) = if (backend.requiresInternet) {
-            ctx.getString(R.string.tr_service_requires_internet) to null
-        } else {
-            ctx.getString(R.string.tr_service_works_offline) to Tone.Accent
-        }
-        appendMaybeColored(builder, internetText, internetTone)
-
-        builder.append(" · ")
-
         val (qualityText, qualityTone) = when (backend.quality) {
             BackendQuality.Bad    -> ctx.getString(R.string.tr_service_quality_bad)    to Tone.Danger
+            BackendQuality.Okay   -> ctx.getString(R.string.tr_service_quality_okay)   to null
             BackendQuality.Good   -> ctx.getString(R.string.tr_service_quality_good)   to null
             BackendQuality.Better -> ctx.getString(R.string.tr_service_quality_better) to Tone.Accent
         }
         appendMaybeColored(builder, qualityText, qualityTone)
+
+        backend.speed?.let { speed ->
+            builder.append(" · ")
+            val (speedText, speedTone) = when (speed) {
+                BackendSpeed.VerySlow -> ctx.getString(R.string.tr_service_speed_very_slow) to Tone.Danger
+                BackendSpeed.Slow     -> ctx.getString(R.string.tr_service_speed_slow)      to Tone.Warning
+                BackendSpeed.Fast     -> ctx.getString(R.string.tr_service_speed_fast)      to Tone.Accent
+            }
+            appendMaybeColored(builder, speedText, speedTone)
+        }
 
         tv.text = builder
         tv.visibility = View.VISIBLE
@@ -794,6 +903,26 @@ class SettingsRenderer(
         }
     }
 
+    /** Refresh the TranslateGemma switch from the current pref value.
+     *  Called from the SP listener after the Cancel branch of the disable
+     *  dialog (which needs to revert the optimistic toggle), and after a
+     *  successful download (which flips the pref to true). */
+    fun refreshTranslategemmaSwitch() {
+        rowBackendTranslategemma.findViewById<MaterialSwitch>(R.id.switchRowToggle)?.let {
+            it.isChecked = prefs.translateGemmaEnabled
+        }
+    }
+
+    /** Refresh the Qwen switch from the current pref value. Called from the SP
+     *  listener after the Cancel branch of the disable dialog (which needs to
+     *  revert the optimistic toggle), and after a successful download (which
+     *  flips the pref to true). */
+    fun refreshQwenSwitch() {
+        rowBackendQwen.findViewById<MaterialSwitch>(R.id.switchRowToggle)?.let {
+            it.isChecked = prefs.qwenEnabled
+        }
+    }
+
     /** Re-render every backend row's secondary subtitle line and kick off
      *  an async [TranslationBackend.refreshStatus] for each. Called on
      *  initial bind, on Settings resume (after [DeepLSettingsActivity]
@@ -818,10 +947,12 @@ class SettingsRenderer(
     }
 
     private fun backendRowById(id: BackendId): View? = when (id) {
-        "deepl"  -> rowBackendDeepl
-        "lingva" -> rowBackendLingva
-        "mlkit"  -> rowBackendMlkit
-        else     -> null
+        "deepl"           -> rowBackendDeepl
+        "lingva"          -> rowBackendLingva
+        "translategemma"  -> rowBackendTranslategemma
+        "qwen"            -> rowBackendQwen
+        "mlkit"           -> rowBackendMlkit
+        else              -> null
     }
 
     /** Apply a [BackendStatus] to a row's secondary subtitle TextView,
@@ -896,6 +1027,117 @@ class SettingsRenderer(
      *      the switch + retriggers status refresh.
      *    - on  → tap: directly disable (preserving the saved DeepL key
      *      so a later re-enable can prepopulate it). */
+    /** Wire the TranslateGemma row's title + tap behavior, or hide it
+     *  entirely when the feature flag is off.
+     *
+     *    - off (model not installed) → tap: callbacks.startTranslateGemmaDownload().
+     *      The download flow is responsible for flipping the pref on success.
+     *    - off (model installed but disabled) → tap: enable directly.
+     *    - on  → tap: callbacks.showTranslateGemmaDisableDialog(); the Cancel
+     *      branch must call refreshTranslategemmaSwitch() to revert the
+     *      optimistic switch flip.
+     *
+     *  The switch state reflects the user's stored intent (`prefs.translateGemmaEnabled`),
+     *  NOT file-system installation state — so a downloaded-but-disabled model
+     *  shows the switch as off. The status line distinguishes the three states.
+     */
+    private fun wireTranslateGemmaBackendRow() {
+        if (!com.playtranslate.BuildConfig.TRANSLATEGEMMA_ENABLED) {
+            // TG is the first row in the Offline card; the divider that
+            // follows it (between TG and Qwen) becomes a stray top border
+            // when TG is hidden, so hide it too.
+            rowBackendTranslategemma.visibility = View.GONE
+            dividerBackendQwen.visibility = View.GONE
+            return
+        }
+
+        rowBackendTranslategemma.findViewById<TextView>(R.id.tvRowTitle).text =
+            ctx.getString(R.string.translategemma_display_name)
+
+        val backend = com.playtranslate.translation.TranslationBackendRegistry
+            .byId("translategemma") as? com.playtranslate.translation.llm.OnDeviceLlmBackend
+        if (backend != null && configureIncompatibleHardwareRow(rowBackendTranslategemma, backend)) {
+            return
+        }
+
+        val switch = rowBackendTranslategemma.findViewById<MaterialSwitch>(R.id.switchRowToggle)
+        switch.isChecked = prefs.translateGemmaEnabled
+
+        rowBackendTranslategemma.setOnClickListener {
+            if (prefs.translateGemmaEnabled) {
+                // Currently on → optimistically flip the switch off so the dialog
+                // shows the right "after" state. Cancel branch reverts it.
+                switch.isChecked = false
+                callbacks.showTranslateGemmaDisableDialog()
+            } else {
+                val installed = com.playtranslate.translation.translategemma
+                    .TranslateGemmaModel.isInstalled(ctx)
+                if (installed) {
+                    // Already downloaded; just enable.
+                    prefs.translateGemmaEnabled = true
+                    switch.isChecked = true
+                } else {
+                    // Need to download. The download flow flips the pref on success
+                    // (which fires the SP listener → switch refresh).
+                    callbacks.startTranslateGemmaDownload()
+                }
+            }
+        }
+    }
+
+    /** Wire the Qwen backend row (download / enable / disable-with-dialog).
+     *  Mirrors [wireTranslateGemmaBackendRow] without the BuildConfig flag —
+     *  Qwen ships visible by default. */
+    private fun wireQwenBackendRow() {
+        rowBackendQwen.findViewById<TextView>(R.id.tvRowTitle).text =
+            ctx.getString(R.string.qwen_display_name)
+
+        val backend = com.playtranslate.translation.TranslationBackendRegistry
+            .byId("qwen") as? com.playtranslate.translation.llm.OnDeviceLlmBackend
+        if (backend != null && configureIncompatibleHardwareRow(rowBackendQwen, backend)) {
+            return
+        }
+
+        val switch = rowBackendQwen.findViewById<MaterialSwitch>(R.id.switchRowToggle)
+        switch.isChecked = prefs.qwenEnabled
+
+        rowBackendQwen.setOnClickListener {
+            if (prefs.qwenEnabled) {
+                switch.isChecked = false
+                callbacks.showQwenDisableDialog()
+            } else {
+                val installed = com.playtranslate.translation.qwen
+                    .QwenModel.isInstalled(ctx)
+                if (installed) {
+                    prefs.qwenEnabled = true
+                    switch.isChecked = true
+                } else {
+                    callbacks.startQwenDownload()
+                }
+            }
+        }
+    }
+
+    /**
+     * If [backend] reports [com.playtranslate.translation.llm.OnDeviceLlmBackend.meetsHardwareRequirements]
+     * = false, configure [row] in a "visible but inert" state: hide the
+     * toggle switch and disable click handling. Title and status line are
+     * left to the caller / [refreshAllBackendStatuses] — the status getter
+     * on the backend surfaces [com.playtranslate.translation.llm.OnDeviceLlmBackend.hardwareIncompatibilityReason]
+     * as the line-2 explanation. Returns true if the row was configured as
+     * incompatible (caller should early-return).
+     */
+    private fun configureIncompatibleHardwareRow(
+        row: View,
+        backend: com.playtranslate.translation.llm.OnDeviceLlmBackend,
+    ): Boolean {
+        if (backend.meetsHardwareRequirements()) return false
+        row.findViewById<MaterialSwitch>(R.id.switchRowToggle).visibility = View.GONE
+        row.setOnClickListener(null)
+        row.isClickable = false
+        return true
+    }
+
     private fun wireDeeplBackendRow() {
         rowBackendDeepl.findViewById<TextView>(R.id.tvRowTitle).text = "DeepL"
 
@@ -966,7 +1208,7 @@ class SettingsRenderer(
             !installed -> {
                 tvAnkiSectionTitle.visibility = View.GONE
                 llAnkiPermission.visibility = View.GONE
-                rowAnkiDeck.visibility = View.GONE
+                hideAllAnkiRows()
             }
 
             !ankiManager.hasPermission() -> {
@@ -981,15 +1223,25 @@ class SettingsRenderer(
                     onClick = { callbacks.requestAnkiPermission() }
                 )
                 llAnkiPermission.visibility = View.VISIBLE
-                rowAnkiDeck.visibility = View.GONE
+                hideAllAnkiRows()
             }
 
             else -> {
                 tvAnkiSectionTitle.visibility = View.GONE
                 llAnkiPermission.visibility = View.GONE
                 setupAnkiDeckRow()
+                setupAnkiCardTypeRow()
+                refreshAnkiEditMappingRow()
             }
         }
+    }
+
+    private fun hideAllAnkiRows() {
+        rowAnkiDeck.visibility = View.GONE
+        rowAnkiCardType.visibility = View.GONE
+        dividerAnkiCardType.visibility = View.GONE
+        rowAnkiEditMapping.visibility = View.GONE
+        dividerAnkiEditMapping.visibility = View.GONE
     }
 
     private fun setupAnkiDeckRow() {
@@ -1024,6 +1276,71 @@ class SettingsRenderer(
         val freshPrefs = Prefs(ctx)
         val deckName = freshPrefs.ankiDeckName.ifEmpty { "Not selected" }
         rowAnkiDeck.findViewById<TextView>(R.id.tvRowValue).text = deckName
+    }
+
+    private fun setupAnkiCardTypeRow() {
+        rowAnkiCardType.findViewById<TextView>(R.id.tvRowTitle).text = "Card Type"
+        refreshAnkiCardTypeValue()
+        rowAnkiCardType.setOnClickListener {
+            callbacks.showAnkiCardTypePicker { refreshAnkiCardTypeValue() }
+        }
+        rowAnkiCardType.visibility = View.VISIBLE
+        dividerAnkiCardType.visibility = View.VISIBLE
+        validateAnkiCardType()
+    }
+
+    /**
+     * Heal the saved card type against AnkiDroid's live model list. If
+     * the saved id was deleted (or never existed), reset to the Default
+     * sentinel. If found, refresh the saved name so a rename in
+     * AnkiDroid surfaces here too.
+     */
+    private fun validateAnkiCardType() {
+        if (prefs.ankiModelId == -1L) return
+        lifecycleScope.launch {
+            val models = withContext(Dispatchers.IO) { AnkiManager(ctx).getModels() }
+            if (models.isEmpty()) return@launch
+            val match = models.firstOrNull { it.id == prefs.ankiModelId }
+            if (match == null) {
+                prefs.ankiModelId = -1L
+                prefs.ankiModelName = ""
+                refreshAnkiCardTypeValue()
+            } else if (match.name != prefs.ankiModelName) {
+                prefs.ankiModelName = match.name
+                refreshAnkiCardTypeValue()
+            }
+        }
+    }
+
+    private fun refreshAnkiCardTypeValue() {
+        val freshPrefs = Prefs(ctx)
+        val label = freshPrefs.ankiModelName.ifBlank {
+            ctx.getString(R.string.anki_card_type_row_empty)
+        }
+        rowAnkiCardType.findViewById<TextView>(R.id.tvRowValue).text = label
+        refreshAnkiEditMappingRow()
+    }
+
+    /**
+     * The "Edit field mapping" row is only relevant when the user has
+     * picked a non-default card type — the Default (PlayTranslate) path
+     * uses v004's fixed two-field schema and has nothing to map.
+     */
+    private fun refreshAnkiEditMappingRow() {
+        val hasCustom = prefs.ankiModelId != -1L
+        if (!hasCustom) {
+            rowAnkiEditMapping.visibility = View.GONE
+            dividerAnkiEditMapping.visibility = View.GONE
+            return
+        }
+        rowAnkiEditMapping.findViewById<TextView>(R.id.tvRowTitle).text =
+            ctx.getString(R.string.anki_card_type_edit_mapping_row_label)
+        rowAnkiEditMapping.findViewById<TextView>(R.id.tvRowValue).text = ""
+        rowAnkiEditMapping.setOnClickListener {
+            callbacks.showAnkiCardTypeMapping { refreshAnkiCardTypeValue() }
+        }
+        rowAnkiEditMapping.visibility = View.VISIBLE
+        dividerAnkiEditMapping.visibility = View.VISIBLE
     }
 
     // ── Appearance ───────────────────────────────────────────────────────
@@ -1355,6 +1672,17 @@ class SettingsRenderer(
             prefs.debugSaveOcrSeed = checked
         }
         rowSaveOcrSeed.setOnClickListener { switchSaveOcrSeed.toggle() }
+
+        // Log OCR grouping decisions (per-pair MERGE/SPLIT + numeric reason)
+        val rowLogGrouping = root.findViewById<View>(R.id.rowLogGrouping)
+        val switchLogGrouping = rowLogGrouping.findViewById<MaterialSwitch>(R.id.switchRowToggle)
+        rowLogGrouping.findViewById<TextView>(R.id.tvRowTitle).text = "Log OCR grouping decisions"
+        switchLogGrouping.isChecked = prefs.debugLogGrouping
+        switchLogGrouping.setOnCheckedChangeListener { _, checked ->
+            prefs.debugLogGrouping = checked
+            OcrManager.instance.debugLogGroupingEnabled = checked
+        }
+        rowLogGrouping.setOnClickListener { switchLogGrouping.toggle() }
 
         // Force crash
         val rowForceCrash = root.findViewById<View>(R.id.rowForceCrash)
